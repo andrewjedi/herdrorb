@@ -107,6 +107,35 @@ final class ReadinessTests: XCTestCase {
         XCTAssertFalse(model.showingSetup)
         await model.stop()
     }
+    @MainActor func testMissingAgentDoesNotCreateTerminalAndFailedStartReusesPane() async throws {
+        let suite = "herdrorb-launch-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        preferences.set(false, forKey: "saveConversations")
+        let transport = LaunchFixture()
+        var installed = false
+        let model = BubbleModel(preferences: preferences, probeAgents: { _ in AgentAvailability(codex: installed, claude: false) },
+                                discover: { [.local] }, makeTransport: { _ in transport })
+        await model.start()
+        for _ in 0..<50 where model.connection["local"] != .online { try await Task.sleep(nanoseconds: 10_000_000) }
+        await model.launch(kind: "codex", machine: .local, directory: "")
+        let noCreations = await transport.creations
+        XCTAssertEqual(noCreations, 0)
+        XCTAssertTrue(model.globalNotice?.contains("Install Codex") == true)
+        installed = true
+        await model.launch(kind: "codex", machine: .local, directory: "")
+        XCTAssertNotNil(model.failedLaunches["local"])
+        await model.openRecoveryTerminal(.local)
+        XCTAssertTrue(model.selected?.isShell == true)
+        XCTAssertTrue(model.current.terminal)
+        await model.retryLaunch(.local)
+        let oneCreation = await transport.creations
+        XCTAssertEqual(oneCreation, 1, "Explicit retry must reuse the original pane")
+        XCTAssertNil(model.failedLaunches["local"])
+        XCTAssertEqual(model.selected?.agent, "codex")
+        XCTAssertNil(model.globalNotice)
+        await model.stop()
+    }
     func testClaudeAndCodexParserFixtures() {
         for kind in ["codex", "claude"] {
             let messages = TerminalPresentation.messages("› Please review this sample.\n\n• Here is a safe example response.", kind: kind)
@@ -114,4 +143,27 @@ final class ReadinessTests: XCTestCase {
             XCTAssertTrue(messages.contains { $0.text.contains("safe example response") })
         }
     }
+}
+
+private actor LaunchFixture: HerdrConnection {
+    var creations = 0
+    var starts = 0
+    var running = false
+    func request(_ method: String, _ params: [String: Any], timeout: TimeInterval) async throws -> [String: Any] {
+        switch method {
+        case "session.snapshot":
+            return ["snapshot": ["protocol": 22,
+                "panes": creations == 0 ? [] : [["pane_id": "p", "terminal_id": "t", "tab_id": "tab"]],
+                "agents": running ? [["pane_id": "p", "agent": "codex", "agent_status": "idle"]] : [],
+                "tabs": [["tab_id": "tab", "label": "Recovery fixture"]]]]
+        case "tab.create": creations += 1; return ["root_pane": ["pane_id": "p"]]
+        case "agent.start":
+            starts += 1
+            if starts == 1 { throw RPCError(code: "agent_not_ready", message: "Sign-in required") }
+            running = true; return [:]
+        default: return [:]
+        }
+    }
+    func events() async throws -> AsyncThrowingStream<Data, Error> { AsyncThrowingStream { _ in } }
+    func shutdown() async { }
 }
