@@ -1,0 +1,15 @@
+.build/
+dist/
+.DS_Store
+.swiftpm/
+*.xcuserstate
+xcuserdata/
+.env
+.env.*
+*.p12
+*.p8
+*.mobileprovision
+*.keychain*
+# Historical local development notes contain private machine names and paths.
+docs/performance-review-2026-09-20.md
+docs/responsiveness-implementation-2026-09-20.md

@@ -1,0 +1,52 @@
+name: Release candidate
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check tag matches source version
+        run: test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
+      - run: swift test
+      - run: sh scripts/check.sh
+      - run: sh scripts/package-release.sh
+      - run: sh scripts/verify-bundle.sh dist/herdrorb.app
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: herdrorb-${{ matrix.runner }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          retention-days: 14
+  draft:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified archives and create a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$REPOSITORY" --dir artifacts
+          cat > release-notes.md <<'NOTES'
+          Independent macOS companion for Herdr. Requires macOS 14+ and Herdr 0.9.1 / protocol 22.
+
+          These developer-beta archives are ad-hoc signed and are NOT Developer ID signed or notarized. Gatekeeper may block downloaded builds. Building from source is recommended until a notarized release is available.
+
+          Choose arm64 for Apple Silicon or x86_64 for Intel. Agent CLIs must already be installed and authenticated on each target Mac. See README, CHANGELOG, and docs/COMPATIBILITY.md for setup and current validation limits.
+          NOTES
+          gh release create "$TAG" --repo "$REPOSITORY" --verify-tag --draft --prerelease --title "herdrorb $TAG" --notes-file release-notes.md artifacts/*/*.zip artifacts/*/*.sha256
