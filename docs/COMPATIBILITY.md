@@ -4,7 +4,7 @@
 |---|---|
 | macOS | Deployment target 14.0+. CI targets macOS 14 (arm64) and macOS 15 (Intel). |
 | CPU | Separate arm64 and x86_64 builds. Choose the architecture of your Mac. |
-| Swift | Manifests require 6.0+. Local build/unit/interaction validation used Apple Swift 6.3.3. CI logs record its actual toolchain. |
+| Swift | Manifests require 6.0+. Local build/unit/interaction validation used Apple Swift 6.3.3. macOS 14 CI selects Xcode 16.2 / Swift 6.0.3 explicitly; the Intel runner uses its current default. CI logs record each actual toolchain. |
 | Herdr | Tested with 0.9.1; API protocol must equal 22. Other versions sharing 22 are not automatically claimed as tested. |
 | SwiftTerm | Pinned to 1.20.0; resolved dependency versions are committed. |
 | Agents | Codex and Claude Code executable discovery and terminal attachment. Authentication stays with the CLIs. |

@@ -16,6 +16,9 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Select Swift 6 on macOS 14
+        if: matrix.runner == 'macos-14'
+        run: echo 'DEVELOPER_DIR=/Applications/Xcode_16.2.app/Contents/Developer' >> "$GITHUB_ENV"
       - name: Check tag matches source version
         run: test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
       - run: swift test
