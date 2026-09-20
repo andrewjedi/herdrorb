@@ -11,6 +11,11 @@
    `v` plus VERSION. The tag workflow tests/builds both architectures, packages
    archives/checksums, and creates a draft prerelease. Review and publish it.
 
+If packaging fails, fix the workflow on main and run **Release candidate**
+manually with the existing version tag. It checks out that tag and verifies its
+VERSION before building. Published tags do not need to be moved. A release that
+already exists must be reviewed instead of overwritten.
+
 The default workflow produces **ad-hoc-signed, unnotarized developer betas**.
 The release body says so explicitly. Source builds remain available to everyone.
 Do not remove that warning until actual distribution signing and notarization
