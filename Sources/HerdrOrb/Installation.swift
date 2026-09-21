@@ -2,19 +2,24 @@ import Foundation
 
 enum AppPreferences {
     static let bundleID = "io.github.andrewjedi.herdrorb"
-    static let isDemo = CommandLine.arguments.contains("--demo")
+    static let isDemo = CommandLine.arguments.contains("--demo") || CommandLine.arguments.contains("--render-previews")
     static let isSetupPreview = CommandLine.arguments.contains("--setup-preview")
+    private static let previewSuite = bundleID + ".preview." + UUID().uuidString
     static let current: UserDefaults = (isDemo || isSetupPreview)
-        ? UserDefaults(suiteName: bundleID + ".preview")! : .standard
+        ? UserDefaults(suiteName: previewSuite)! : .standard
 
     static func prepare() {
-        if isDemo || isSetupPreview { current.removePersistentDomain(forName: bundleID + ".preview") }
+        if isDemo || isSetupPreview { current.removePersistentDomain(forName: previewSuite) }
         if !isDemo && !isSetupPreview {
             migrate(into: current)
             migrateStorage()
         }
         current.register(defaults: ["saveConversations": true, "automaticImagePreviews": true,
                                     "showOrb": true, "orbHoverSound": true, "orbStatusDot": true])
+    }
+    static func cleanUpPreview() {
+        guard isDemo || isSetupPreview else { return }
+        current.removePersistentDomain(forName: previewSuite)
     }
     static func migrateStorage(fileManager: FileManager = .default) {
         for location: FileManager.SearchPathDirectory in [.applicationSupportDirectory, .cachesDirectory] {

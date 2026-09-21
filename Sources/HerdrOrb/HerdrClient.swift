@@ -376,6 +376,19 @@ struct PendingMessage: Identifiable, Equatable {
     func canInteract(_ agent: Agent) -> Bool {
         connection[agent.machineID] == .online && agents.contains { $0.id == agent.id && $0.profileIdentity == agent.profileIdentity }
     }
+    func needsTerminalResponse(_ agent: Agent) -> Bool {
+        let current = agents.first { $0.id == agent.id && $0.profileIdentity == agent.profileIdentity } ?? agent
+        return current.agent_status == "blocked"
+    }
+    func respondInTerminal(_ agent: Agent) {
+        guard canInteract(agent) else { return }
+        let state = state(agent)
+        // A chat draft, including "yes", must never become terminal approval input.
+        state.terminalSeed = nil; state.terminalSeedFromDraft = false
+        state.commandMode = true; state.terminalConnected = isDemo; state.terminal = true
+        state.notice = nil
+        resumeLive()
+    }
     func readSelected() async {
         guard let agent = selected, canInteract(agent), let transport = transports[agent.machineID] else { return }
         let state = state(agent)
@@ -476,6 +489,10 @@ struct PendingMessage: Identifiable, Equatable {
         }
         let state = state(agent)
         let text = state.draft
+        guard !needsTerminalResponse(agent) else {
+            state.notice = "This session needs a response in Terminal. Your chat draft has been kept."
+            return
+        }
         if Self.isSlashCommand(text) {
             openSlashCommands(agent, text: text, fromDraft: true, submit: true)
             return

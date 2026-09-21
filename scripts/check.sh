@@ -3,7 +3,7 @@ set -eu
 cd "$(dirname "$0")/.."
 CHECK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/herdrorb-checks.XXXXXX")
 trap 'rm -rf "$CHECK_TMP"' EXIT HUP INT TERM
-COMMON="Sources/HerdrOrb/Installation.swift Sources/HerdrOrb/HerdrClient.swift Sources/HerdrOrb/Transport.swift Sources/HerdrOrb/ConversationCache.swift Sources/HerdrOrb/SessionNames.swift Sources/HerdrOrb/TerminalPresentation.swift"
+COMMON="Sources/HerdrOrb/DesignSystem.swift Sources/HerdrOrb/Installation.swift Sources/HerdrOrb/HerdrClient.swift Sources/HerdrOrb/Transport.swift Sources/HerdrOrb/ConversationCache.swift Sources/HerdrOrb/SessionNames.swift Sources/HerdrOrb/TerminalPresentation.swift"
 swiftc -parse-as-library $COMMON Sources/HerdrOrb/MessageComposer.swift Tests/ConversationChecks.swift -o "$CHECK_TMP/herdr-conversation-checks"
 "$CHECK_TMP/herdr-conversation-checks"
 cat Sources/HerdrOrb/TerminalPresentation.swift Tests/PresentationChecks.swift > "$CHECK_TMP/herdr-presentation-checks.swift"
@@ -12,7 +12,7 @@ swiftc -parse-as-library $COMMON Tests/ResponsivenessChecks.swift -o "$CHECK_TMP
 "$CHECK_TMP/herdr-responsiveness-checks"
 swiftc -parse-as-library $COMMON Sources/HerdrOrb/ConversationScroll.swift Tests/ScrollChecks.swift -o "$CHECK_TMP/herdr-scroll-checks"
 "$CHECK_TMP/herdr-scroll-checks"
-swiftc -parse-as-library $COMMON Sources/HerdrOrb/Artifacts.swift Tests/ArtifactChecks.swift -o "$CHECK_TMP/herdr-artifact-checks"
+swiftc -parse-as-library $COMMON Sources/HerdrOrb/ConversationMarkdown.swift Sources/HerdrOrb/Artifacts.swift Tests/ArtifactChecks.swift -o "$CHECK_TMP/herdr-artifact-checks"
 "$CHECK_TMP/herdr-artifact-checks"
 swiftc -parse-as-library Sources/HerdrOrb/TerminalInputBuffer.swift Tests/TerminalInputChecks.swift -o "$CHECK_TMP/herdr-terminal-input-checks"
 "$CHECK_TMP/herdr-terminal-input-checks"

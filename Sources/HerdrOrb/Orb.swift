@@ -48,6 +48,8 @@ final class OrbMetalView: MTKView {
 }
 
 final class OrbRenderer: NSObject, MTKViewDelegate {
+    private static var artworkTextures: [UInt64: MTLTexture] = [:]
+    private var artworkTexture: MTLTexture?
     private static var pipelines: [UInt64: MTLRenderPipelineState] = [:]
     private static let pipelineLock = NSLock()
     let queue: MTLCommandQueue
@@ -87,9 +89,26 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
         float2 rotate(float2 p,float a) {
             return float2(cos(a)*p.x-sin(a)*p.y,sin(a)*p.x+cos(a)*p.y);
         }
-        fragment float4 fragmentMain(V v [[stage_in]], constant float &time [[buffer(0)]], constant float &hover [[buffer(1)]], constant float &variant [[buffer(2)]]) {
+        fragment float4 fragmentMain(V v [[stage_in]], constant float &time [[buffer(0)]], constant float &hover [[buffer(1)]], constant float &variant [[buffer(2)]], constant uint &hasArtwork [[buffer(3)]], texture2d<float> artwork [[texture(0)]]) {
             float2 p=v.uv;
-            float r=length(p), radius=.66;
+            if (hasArtwork != 0) {
+                // The three generated art cells preserve the approved material.
+                // Only interior wisps move; the glass silhouette stays circular.
+                constexpr sampler artSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+                p /= 1. + hover * .035;
+                float r = length(p);
+                float interior = 1. - smoothstep(.4, .78, r);
+                float2 flow = float2(sin(time*.21+p.y*3.)-sin(p.y*3.), cos(time*.17+p.x*3.)-cos(p.x*3.)) * .004 * interior;
+                float centerX = variant < .5 ? .5283 : (variant < 1.5 ? .4896 : .4572);
+                float2 local = float2(centerX, .464) + float2(p.x, -p.y) * .415 + flow;
+                float2 uv = float2((floor(variant+.5)+local.x)/3., local.y);
+                float3 color = artwork.sample(artSampler, uv).rgb;
+                color *= 1. + .025*sin(time*.4)*interior + hover*.12;
+                float core = 1. - smoothstep(.79, .825, r);
+                float alpha = max(core, max(color.r, max(color.g, color.b)));
+                return float4(saturate(color), saturate(alpha));
+            }
+            float r=length(p), radius=.82;
             float edge=1.-smoothstep(radius-.008,radius+.008,r);
             float z=sqrt(max(0.,1.-pow(r/radius,2.)));
             float t=time*(variant < .5 ? .85 : (variant < 1.5 ? .60 : 1.12));
@@ -118,13 +137,13 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
             float reflection=pow(.5+.5*sin(p.x*5.-p.y*3.+z*7.+gas*2.+t*.9),22.);
             float rim=pow(1.-z,3.);
             col*=.65+.35*z;
-            col+=float3(.72,.87,1.)*reflection*.16;
+            col+=float3(.72,.87,1.)*reflection*.035;
             col+=float3(.86,.94,1.)*spec*.65;
             col+=mix(float3(.13,.18,.25),float3(.3,.32,.38),.5+.5*sin(t+r*8.))*rim*.4;
 
             // Narrow white facets and diffraction spikes sparkle over the dark nebula.
             float facet=pow(.5+.5*sin(p.x*18.+p.y*11.+z*13.+t*1.2),64.);
-            col+=float3(.72,.83,1.)*facet*(.12+.3*hover)*smoothstep(.35,.7,gas);
+            col+=float3(.72,.83,1.)*facet*(.035+.2*hover)*smoothstep(.35,.7,gas);
             float2 glintCenter=float2(-.22+.07*sin(t*.9),.28+.06*cos(t*.7));
             float2 sparkle=rotate(p-glintCenter,.3);
             float flash=.65+.35*pow(.5+.5*sin(t*2.1),4.);
@@ -209,7 +228,53 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
             }
         } catch { return nil }
         self.queue = queue
+        if let cached = Self.artworkTextures[device.registryID] { artworkTexture = cached }
+        else {
+            let packaged = Bundle.main.resourceURL.flatMap { Bundle(url: $0.appendingPathComponent("HerdrOrb_HerdrOrb.bundle")) }
+            if let url = (packaged ?? Bundle.module).url(forResource: "OrbAtlas", withExtension: "png"),
+               let texture = try? MTKTextureLoader(device: device).newTexture(URL: url, options: [.SRGB: false]) {
+                artworkTexture = texture
+                Self.artworkTextures[device.registryID] = texture
+            }
+        }
         super.init()
+    }
+    /// Render the production shader into a readable texture for deterministic
+    /// UI snapshots. NSView.cacheDisplay cannot include a CAMetalLayer.
+    static func snapshot(variant: Float, time: Float = 0, pixels: Int = 320) -> NSImage? {
+        guard let device = MTLCreateSystemDefaultDevice() else { return nil }
+        let view = MTKView(frame: .zero, device: device)
+        view.colorPixelFormat = .bgra8Unorm
+        guard let renderer = OrbRenderer(view) else { return nil }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: pixels, height: pixels, mipmapped: false)
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor), let command = renderer.queue.makeCommandBuffer() else { return nil }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return nil }
+        var time = time, variant = variant, hover: Float = 0
+        encoder.setRenderPipelineState(renderer.pipeline)
+        var hasArtwork: UInt32 = renderer.artworkTexture == nil ? 0 : 1
+        encoder.setFragmentBytes(&hasArtwork, length: 4, index: 3)
+        encoder.setFragmentTexture(renderer.artworkTexture, index: 0)
+        encoder.setFragmentBytes(&time, length: 4, index: 0)
+        encoder.setFragmentBytes(&hover, length: 4, index: 1)
+        encoder.setFragmentBytes(&variant, length: 4, index: 2)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding(); command.commit(); command.waitUntilCompleted()
+        guard command.status == .completed else { return nil }
+        var bytes = [UInt8](repeating: 0, count: pixels * pixels * 4)
+        texture.getBytes(&bytes, bytesPerRow: pixels * 4, from: MTLRegionMake2D(0, 0, pixels, pixels), mipmapLevel: 0)
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let image = CGImage(width: pixels, height: pixels, bitsPerComponent: 8, bitsPerPixel: 32,
+                                  bytesPerRow: pixels * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent) else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: pixels / 2, height: pixels / 2))
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     func draw(in view: MTKView) {
@@ -218,6 +283,9 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
         var time = Float(Date().timeIntervalSince(start))
         hoverAmount += ((hovered ? 1 : 0) - hoverAmount) * 0.12
         encoder.setRenderPipelineState(pipeline)
+        var hasArtwork: UInt32 = artworkTexture == nil ? 0 : 1
+        encoder.setFragmentBytes(&hasArtwork, length: 4, index: 3)
+        encoder.setFragmentTexture(artworkTexture, index: 0)
         encoder.setFragmentBytes(&time, length: MemoryLayout<Float>.size, index: 0)
         encoder.setFragmentBytes(&hoverAmount, length: MemoryLayout<Float>.size, index: 1)
         encoder.setFragmentBytes(&variant, length: MemoryLayout<Float>.size, index: 2)

@@ -8,17 +8,19 @@ actor FakeConnection: HerdrConnection {
     var renameLabel = "1"
     var createCount = 0
     var agentPresent = true
+    var agentStatus = "idle"
     init(_ machine: Machine) { self.machine = machine }
     func setDelay(_ value: UInt64) { delay = value }
     func setFailure(_ value: Bool) { failed = value }
     func setAgentPresent(_ value: Bool) { agentPresent = value }
+    func setAgentStatus(_ value: String) { agentStatus = value }
     func request(_ method: String, _ params: [String: Any], timeout: TimeInterval) async throws -> [String: Any] {
         if delay > 0 { try await Task.sleep(nanoseconds: delay) }
         if failed { throw RPCError(code: "transport", message: "Offline fixture") }
         switch method {
         case "session.snapshot":
             return ["snapshot": ["protocol": 22, "panes": [["pane_id": "p1", "terminal_id": "t1", "tab_id": "tab1", "workspace_id": "w1"]],
-                                 "agents": agentPresent ? [["pane_id": "p1", "agent": "codex", "agent_status": "idle"]] : [],
+                                 "agents": agentPresent ? [["pane_id": "p1", "agent": "codex", "agent_status": agentStatus]] : [],
                                  "tabs": [["tab_id": "tab1", "label": renameLabel]], "workspaces": [["workspace_id": "w1", "label": "Project"]]]]
         case "pane.read": return ["read": ["text": "› Hello\n\n• Reply for \(params["pane_id"] as? String ?? "unknown")", "revision": 1]]
         case "agent.prompt": sends += 1; try await Task.sleep(nanoseconds: 200_000_000); return ["sent": true]
@@ -75,6 +77,34 @@ actor FakeConnection: HerdrConnection {
         assert(model.agents.contains(where: { $0.id == first.id }), "Offline inventory must remain visible")
         await fast.setFailure(false)
         await model.refreshMachine(a)
+        await fast.setAgentStatus("blocked")
+        await model.refreshMachine(a)
+        assert(model.needsTerminalResponse(first), "Use current status even when a view supplies an older idle agent")
+        let sendsBeforeApproval = await fast.sends
+        let pendingBeforeApproval = model.current.pending.count
+        model.draft = "yes"
+        await model.send(to: first)
+        let sendsDuringApproval = await fast.sends
+        assert(sendsDuringApproval == sendsBeforeApproval && model.current.pending.count == pendingBeforeApproval,
+               "Approval replies must not be submitted or added as failed chat messages")
+        assert(model.draft == "yes" && model.current.notice != nil)
+        model.current.terminalSeed = "yes\r"
+        model.current.terminalSeedFromDraft = true
+        model.respondInTerminal(first)
+        assert(model.current.terminal && model.current.commandMode && !model.current.terminalConnected)
+        assert(model.current.terminalSeed == nil && !model.current.terminalSeedFromDraft,
+               "The handoff must not replay a draft or stale command as approval input")
+        model.terminalAttached(first)
+        assert(model.draft == "yes", "Terminal attachment must preserve the chat draft")
+        model.closeTerminal(first)
+        await fast.setAgentStatus("idle")
+        await model.refreshMachine(a)
+        assert(!model.needsTerminalResponse(first), "Normal chat must return when the agent is no longer blocked")
+        model.draft = "Continue with the preview"
+        await model.send(to: first)
+        let sendsAfterApproval = await fast.sends
+        assert(sendsAfterApproval == sendsBeforeApproval + 1 && model.draft.isEmpty)
+        print("Blocked chat prevention, terminal handoff without approval input, draft preservation and chat recovery passed")
         model.rename(first, to: "Shared title")
         try await Task.sleep(nanoseconds: 20_000_000)
         let name = await fast.renameLabel

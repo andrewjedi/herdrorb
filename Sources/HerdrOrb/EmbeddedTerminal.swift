@@ -13,14 +13,14 @@ struct EmbeddedTerminal: NSViewRepresentable {
     func makeNSView(context: Context) -> InteractiveTerminalView {
         let view = InteractiveTerminalView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         view.appearance = NSAppearance(named: .darkAqua)
-        view.nativeBackgroundColor = NSColor(srgbRed: 0.065, green: 0.075, blue: 0.10, alpha: 1)
-        view.nativeForegroundColor = NSColor(srgbRed: 0.92, green: 0.93, blue: 0.96, alpha: 1)
-        view.caretColor = NSColor(srgbRed: 0.72, green: 0.66, blue: 1, alpha: 1)
+        view.nativeBackgroundColor = NSColor(srgbRed: 12/255, green: 13/255, blue: 16/255, alpha: 1)
+        view.nativeForegroundColor = OrbTheme.nsText
+        view.caretColor = OrbTheme.nsAccent
         view.inputBuffer = TerminalInputBuffer(initial: initialInput)
         view.ready = onReady
         view.setAccessibilityLabel("\(agent.kind) interactive terminal")
         context.coordinator.onExit = onExit
-        view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        view.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         view.processDelegate = context.coordinator
         let args = ["terminal", "attach", agent.terminal_id]
         var environment = ConnectionCommands.environment()

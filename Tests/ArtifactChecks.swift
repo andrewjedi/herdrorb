@@ -16,7 +16,17 @@ import AppKit
             assertionFailure("Missing artifact must report failure")
         } catch {}
         assert(MachineTransport.quote("/tmp/a'b.png") == "'/tmp/a'\\''b.png'")
-        print("Local artifact retrieval, relative paths, missing-file recovery and shell quoting passed")
+        let markdown = directory.appendingPathComponent("notes.md")
+        try Data("# Notes\n\nActual document contents".utf8).write(to: markdown)
+        let document = try ArtifactDocumentText.load(markdown)
+        assert(document == "# Notes\n\nActual document contents")
+        try Data(repeating: 65, count: 512_001).write(to: markdown)
+        let oversized = try ArtifactDocumentText.load(markdown)
+        assert(oversized == nil, "Oversized Markdown must retain Quick Look")
+        try Data([0xff, 0xfe, 0x80]).write(to: markdown)
+        let invalid = try ArtifactDocumentText.load(markdown)
+        assert(invalid == nil, "Invalid UTF-8 must retain Quick Look")
+        print("Local artifact retrieval, paths, missing-file recovery, quoting, and bounded Markdown loading passed")
         if CommandLine.arguments.count >= 4 && CommandLine.arguments[1] == "--remote" {
             let machines = try await HerdrClient.machines()
             let machine = machines.first { $0.id == CommandLine.arguments[2] }!

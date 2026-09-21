@@ -11,21 +11,35 @@ enum OrbStyle: String, CaseIterable, Identifiable {
     }
     var detail: String {
         switch self {
-        case .nebula: return "Living violet clouds"
-        case .pearl: return "Ethereal teal and mint"
-        case .eclipse: return "Fiery rose and gold"
+        case .nebula: return "Violet smoke"
+        case .pearl: return "Teal and mint"
+        case .eclipse: return "Rose and gold"
         }
     }
 }
 
+private struct OrbSnapshotTimeKey: EnvironmentKey { static let defaultValue: Float? = nil }
+extension EnvironmentValues {
+    var orbSnapshotTime: Float? {
+        get { self[OrbSnapshotTimeKey.self] }
+        set { self[OrbSnapshotTimeKey.self] = newValue }
+    }
+}
+
 struct OrbArtwork: View {
+    @Environment(\.orbSnapshotTime) private var snapshotTime
     var style: OrbStyle
     var hovered = false
     var body: some View {
         GeometryReader { proxy in
             let size = min(proxy.size.width, proxy.size.height)
-            PearlOrb(hovered: hovered, variant: style.shaderVariant)
-                .frame(width: size, height: size)
+            Group {
+                if let time = snapshotTime, let image = OrbRenderer.snapshot(variant: style.shaderVariant, time: time) {
+                    Image(nsImage: image).resizable()
+                } else {
+                    PearlOrb(hovered: hovered, variant: style.shaderVariant)
+                }
+            }.frame(width: size, height: size)
                 .frame(width: proxy.size.width, height: proxy.size.height)
         }.allowsHitTesting(false)
     }

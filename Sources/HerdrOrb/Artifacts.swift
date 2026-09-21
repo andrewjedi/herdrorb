@@ -100,10 +100,10 @@ struct ArtifactCard: View {
         VStack(alignment: .leading, spacing: 6) {
             if artifact.isImage { imagePreview }
             HStack(spacing: 10) {
-                Image(systemName: "doc.richtext").font(.system(size: 20)).foregroundStyle(.secondary)
+                Image(systemName: "doc.richtext").font(.system(size: 20)).foregroundStyle(OrbTheme.secondary)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(artifact.name).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                    Text(machine.label).font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text(artifact.name).font(.system(size: 14, weight: .medium)).lineLimit(2)
+                    Text(machine.label).font(.system(size: 12)).foregroundStyle(OrbTheme.secondary)
                 }
                 Spacer(minLength: 6)
                 Button {
@@ -118,33 +118,34 @@ struct ArtifactCard: View {
                         } catch { self.error = error.localizedDescription }
                     }
                 } label: { Text(loading ? "Loading…" : "Preview").font(.system(size: 11)) }
-                    .disabled(loading).buttonStyle(.bordered)
+                    .disabled(loading).buttonStyle(OrbButtonStyle(compact: true))
                     .help(machine.id == "local" ? "Preview this file" : "Fetch this file from \(machine.label) and preview it here")
             }
-        }.padding(12).background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.12)))
+        }.padding(12).background(OrbTheme.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(OrbTheme.controlEdge, lineWidth: 0.8))
             .help(artifact.path)
             .task(id: imageTaskID) {
                 if artifact.isImage && automaticImages { await loadImage() }
             }
-            .alert("Couldn’t preview this file", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
-                Button("OK") { error = nil }
-            } message: { Text(error ?? "") }
+            .sheet(isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+                OrbSheet(width: 470) {
+                    ArtifactErrorView(title: "Couldn’t preview this file", detail: error ?? "", symbol: "doc", actionTitle: "OK", inlineAction: true) { error = nil }
+                }
+            }
     }
     private var imagePreview: some View {
                 ZStack {
-                    Color.black.opacity(0.12)
+                    OrbTheme.canvas
                     if let thumbnail {
                         Image(nsImage: thumbnail).resizable().scaledToFit()
                             .accessibilityLabel("Image: \(artifact.name)")
                             .onTapGesture { if let localFile { ArtifactPreview.shared.show(localFile, source: machine.label) } }
                     } else if let imageError {
-                        VStack(spacing: 8) {
-                            Text(imageError).font(.system(size: 11)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                            Button("Retry image") { Task { await loadImage() } }.font(.system(size: 11))
-                        }.padding(12)
+                        ArtifactErrorView(title: "Couldn’t load image", detail: imageError, symbol: "photo", actionTitle: "Retry image") {
+                            Task { await loadImage() }
+                        }.padding(20)
                     } else if imageLoading { ProgressView("Loading image…").controlSize(.small).font(.system(size: 11)) }
-                    else { Button("Load image") { Task { await loadImage() } }.buttonStyle(.bordered) }
+                    else { Button("Load image") { Task { await loadImage() } }.buttonStyle(OrbButtonStyle(compact: true)) }
                 }.frame(height: 220).frame(maxWidth: .infinity).clipShape(RoundedRectangle(cornerRadius: 7))
     }
     @MainActor private func loadImage() async {
@@ -168,7 +169,9 @@ struct ArtifactCard: View {
     private var windows: [NSWindow] = []
     func show(_ url: URL, source: String) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 620), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "\(url.lastPathComponent) — \(source)"
+        window.title = "\(url.lastPathComponent) · \(source)"
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = OrbTheme.nsCanvas
         window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
         window.isReleasedWhenClosed = false
         let preview = QLPreviewView(frame: window.contentView!.bounds, style: .normal)!
@@ -178,8 +181,65 @@ struct ArtifactCard: View {
         window.contentView = preview
         window.delegate = self; windows.append(window)
         window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
+        if ["md", "markdown"].contains(url.pathExtension.lowercased()) {
+            Task { @MainActor [weak window] in
+                let markdown = await Task.detached(priority: .userInitiated) {
+                    try? ArtifactDocumentText.load(url)
+                }.value
+                guard let window, window.isVisible, let markdown else { return }
+                window.contentView = NSHostingView(rootView: MarkdownArtifactDocument(text: markdown).preferredColorScheme(.dark))
+            }
+        }
     }
     func windowWillClose(_ notification: Notification) {
         if let window = notification.object as? NSWindow { windows.removeAll { $0 === window } }
+    }
+}
+
+enum ArtifactDocumentText {
+    static func load(_ url: URL) throws -> String? {
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        guard let data = try file.read(upToCount: 512_001), data.count <= 512_000 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+/// The actual local or downloaded Markdown, rendered with the app's native text
+/// components. Other file types and oversized/invalid text retain Quick Look.
+struct MarkdownArtifactDocument: View {
+    let text: String
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    Text("DOCUMENT PREVIEW").font(.system(size: 10)).tracking(1.5).foregroundStyle(OrbTheme.secondary)
+                    ConversationMarkdown(text: text, documentStyle: true)
+                        .font(.system(size: 16)).lineSpacing(4)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(36)
+            }
+        }.background(OrbTheme.canvas).foregroundStyle(OrbTheme.text)
+    }
+}
+
+struct ArtifactErrorView: View {
+    let title: String
+    let detail: String
+    var symbol = "photo"
+    var actionTitle = "Retry image"
+    var inlineAction = false
+    var action: () -> Void
+    var body: some View {
+        HStack(alignment: .top, spacing: 18) {
+            Image(systemName: symbol).font(.system(size: 26, weight: .light)).foregroundStyle(OrbTheme.secondary)
+                .frame(width: 48, height: 48).background(OrbTheme.surface, in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(OrbTheme.controlEdge, lineWidth: 0.75))
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title).font(.system(size: 17, weight: .semibold))
+                Text(detail).font(.system(size: 13)).foregroundStyle(OrbTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                if !inlineAction { Button(actionTitle, action: action).buttonStyle(OrbButtonStyle(kind: .primary)).padding(.top, 4) }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if inlineAction { Button(actionTitle, action: action).buttonStyle(OrbButtonStyle(kind: .primary)).padding(.top, 6) }
+        }.foregroundStyle(OrbTheme.text)
     }
 }

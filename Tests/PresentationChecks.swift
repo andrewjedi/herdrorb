@@ -87,3 +87,50 @@ assert(blocks.contains { $0.kind == .item("2.") })
 assert(blocks.contains { $0.kind == .code && $0.text == "let value = 1" })
 assert(ConversationBlock.parse("```\npartial").last == ConversationBlock(kind: .code, text: "partial"))
 print("Startup banner cleanup, quoted-output preservation, Markdown lists/headings/code and streaming fences passed")
+
+// The terminal transcript in the conversation-mode report: commands and temporary
+// downloads should collapse, while the actual answer and its links stay readable.
+let noisyTurn = """
+› Check my website.
+• I’ll check the page and its title.
+✔ You approved codex to run curl -fsS https://example.com/ this time
+• Running curl -fsS https://example.com/ -o /tmp/site-check.html
+  │ && rg -o '<title>[^<]+' /tmp/site-check.html
+• Ran curl -fsS https://example.com/ -o /tmp/site-check.html
+  └ <title>My website
+• The website is available at [example.com](https://example.com).
+
+Keep your Mac awake while the server is running.
+Worked for 13m 35s · done 8:29 PM
+"""
+let noisyMessages = TerminalPresentation.messages(noisyTurn, kind: "codex")
+let quiet = TerminalPresentation.response(noisyMessages[1], kind: "codex", working: false)
+assert(quiet.answer == "The website is available at [example.com](https://example.com).\n\nKeep your Mac awake while the server is running.")
+assert(quiet.duration == "Worked for 13m 35s")
+assert(quiet.activity.contains("You approved") && quiet.activity.contains("Ran curl") && quiet.activity.contains("I’ll check"))
+assert(quiet.artifacts.isEmpty, "Temporary files mentioned in tool output must not become answer cards")
+let inProgress = TerminalPresentation.messages("› Check the site.\n• I’ll check its title.\n• Running curl https://example.com", kind: "codex")
+let thinking = TerminalPresentation.response(inProgress[1], kind: "codex", working: true)
+assert(thinking.answer.isEmpty && thinking.activity.contains("Running curl"))
+assert(inProgress[1].text.contains("• I’ll check"), "Collapsing must not mutate the searchable source")
+let finished = TerminalPresentation.messages("› Check\n• Explored\n  └ Read README.md\n─ Worked for 2m 10s ─────\n• Done. See [notes](/tmp/release-notes.md).", kind: "codex")
+let finalDuringStatusLag = TerminalPresentation.response(finished[1], kind: "codex", working: true)
+assert(finalDuringStatusLag.answer == "Done. See [notes](/tmp/release-notes.md).")
+assert(finalDuringStatusLag.duration == "Worked for 2m 10s")
+assert(finalDuringStatusLag.artifacts.map(\.path) == ["/tmp/release-notes.md"])
+let literal = SessionMessage(id: "literal", fromUser: false, text: "• Example:\n```\n• Ran curl\nWorked for 10s\n```\n- Keep this list\n\nAnother paragraph.")
+let literalResponse = TerminalPresentation.response(literal, kind: "codex", working: false)
+assert(literalResponse.answer.contains("• Ran curl") && literalResponse.answer.contains("Worked for 10s"))
+assert(literalResponse.answer.contains("- Keep this list") && literalResponse.activity.isEmpty)
+let noTools = SessionMessage(id: "prose", fromUser: false, text: "• Let me think.\n─ Worked for 5s ───\n• Here is the answer.")
+assert(TerminalPresentation.response(noTools, kind: "codex", working: false).activity == "Let me think.")
+assert(TerminalPresentation.response(noTools, kind: "codex", working: false).answer == "Here is the answer.")
+assert(TerminalPresentation.response(noisyMessages[0], kind: "codex", working: true).answer == "Check my website.")
+assert(TerminalPresentation.response(literal, kind: "claude", working: false).answer == literal.text)
+let partial = SessionMessage(id: "partial", fromUser: false, text: "A partial viewport with no recognizable cells.")
+assert(TerminalPresentation.response(partial, kind: "codex", working: false).answer == partial.text)
+print("Collapsed activity: commands, approvals, progress, streaming, completion boundaries, final artifacts, quoted code, user text and fallback preservation passed")
+let approvalFirst = TerminalPresentation.messages("› Do it.\n✔ You approved codex to run swift test this time\n• Ran swift test\n  └ Passed\n• Done.", kind: "codex")
+assert(approvalFirst[0].text == "Do it." && approvalFirst.count == 2)
+assert(TerminalPresentation.response(approvalFirst[1], kind: "codex", working: false).answer == "Done.")
+print("Approval-first responses stay out of user messages")

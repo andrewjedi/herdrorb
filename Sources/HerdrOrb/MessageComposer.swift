@@ -51,9 +51,9 @@ struct MessageComposer: NSViewRepresentable {
         editor.minSize = NSSize(width: 0, height: 52)
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.drawsBackground = false
-        editor.textColor = .labelColor
-        editor.insertionPointColor = .labelColor
-        editor.font = .systemFont(ofSize: 13)
+        editor.textColor = OrbTheme.nsText
+        editor.insertionPointColor = OrbTheme.nsAccent
+        editor.font = .systemFont(ofSize: 15)
         editor.textContainerInset = NSSize(width: 0, height: 5)
         editor.isVerticallyResizable = true
         editor.isHorizontallyResizable = false

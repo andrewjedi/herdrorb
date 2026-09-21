@@ -71,6 +71,79 @@ struct MessagePart: Equatable, Sendable {
     var text: String
     var status: Bool
 }
+
+/// A reversible presentation of terminal cells. Raw messages remain untouched for
+/// search, caching, and the activity disclosure; this is not structured reasoning.
+struct ConversationResponse: Equatable {
+    var answer: String
+    var activity: String
+    var duration: String?
+    var artifacts: [ArtifactReference] { TerminalPresentation.artifacts(answer) }
+}
+
+extension TerminalPresentation {
+    static func response(_ message: SessionMessage, kind: String?, working: Bool) -> ConversationResponse {
+        guard !message.fromUser, kind == "codex" else {
+            return ConversationResponse(answer: message.text, activity: "")
+        }
+        struct Cell {
+            var text: String
+            var tool: Bool
+        }
+        var cells: [Cell] = []
+        var buffer: [String] = []
+        var tool = false
+        var fenced = false
+        var duration: String?
+        var completedBoundary = false
+        var boundaryIndex: Int?
+        func flush() {
+            let text = buffer.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { cells.append(Cell(text: text, tool: tool)) }
+            buffer = []
+            tool = false
+        }
+        for line in message.text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") { fenced.toggle() }
+            if !fenced {
+                let status = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "─━ "))
+                if status.range(of: #"^Worked for \d[^\n]*"#, options: .regularExpression) != nil {
+                    flush()
+                    duration = status.components(separatedBy: " · ").first
+                    completedBoundary = true
+                    boundaryIndex = cells.count
+                    continue
+                }
+                if status.range(of: #"^[Dd]one \d{1,2}:\d{2}(?:\s*[APap][Mm])?$"#, options: .regularExpression) != nil { continue }
+                let marked = line.hasPrefix("• ") || line.hasPrefix("● ")
+                let approved = line.hasPrefix("✔ ") || line.hasPrefix("✓ ")
+                if marked || approved {
+                    flush()
+                    let content = String(line.dropFirst(2))
+                    tool = approved || content.range(of: #"^(?:(?:Ran|Running|Called|Calling|Edited|Added|Deleted|Read|Searched|Searching|Exploring)\s|Explored(?:\s|$)|Updated [Pp]lan|You approved\s)"#, options: .regularExpression) != nil
+                    buffer.append(content)
+                    continue
+                }
+            }
+            buffer.append(line)
+        }
+        flush()
+        // The final prose cell after tool output is the answer. Earlier prose is
+        // progress commentary. Without tool evidence, preserve all idle prose.
+        let lastTool = cells.lastIndex(where: \.tool)
+        let answerStart: Int
+        if working && !completedBoundary { answerStart = cells.count }
+        else if let lastTool { answerStart = lastTool + 1 }
+        else if let boundaryIndex, boundaryIndex < cells.count { answerStart = boundaryIndex }
+        else { answerStart = 0 }
+        return ConversationResponse(
+            answer: cells.dropFirst(answerStart).map(\.text).joined(separator: "\n\n"),
+            activity: cells.prefix(answerStart).map(\.text).joined(separator: "\n\n"),
+            duration: duration
+        )
+    }
+}
 struct ArtifactReference: Identifiable, Equatable, Sendable {
     var path: String
     var id: String { path }
@@ -199,7 +272,7 @@ extension TerminalPresentation {
             if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") { inCode.toggle() }
             if line.hasPrefix(marker) && !inCode {
                 flush(); user = true; buffer.append(String(line.dropFirst(marker.count)))
-            } else if user && !inCode && (line.hasPrefix("• ") || line.hasPrefix("● ")) {
+            } else if user && !inCode && (line.hasPrefix("• ") || line.hasPrefix("● ") || line.hasPrefix("✔ You approved") || line.hasPrefix("✓ You approved")) {
                 flush(); user = false; buffer.append(line)
             } else {
                 buffer.append(line)

@@ -8,6 +8,7 @@ struct ConversationContentVersion: Equatable {
     let raw: String?
     let status: String
     let loading: Bool
+    var disclosures: Set<String> = []
 }
 
 /// AppKit owns the scroll offset. Streaming updates never write a SwiftUI scroll
@@ -88,7 +89,7 @@ struct ConversationScroll<Content: View>: NSViewRepresentable {
             let newWidth = scroll.contentSize.width
             // Measure with the viewport's exact width, not the hosting view's ideal
             // fitting width (which underestimates wrapped text height).
-            let height = max(scroll.contentSize.height, host.sizeThatFits(in: NSSize(width: newWidth, height: CGFloat.greatestFiniteMagnitude)).height)
+            let height = max(scroll.contentSize.height, host.sizeThatFits(in: NSSize(width: newWidth, height: scroll.contentSize.height)).height)
             host.view.frame = NSRect(x: 0, y: 0, width: newWidth, height: height)
             host.view.layoutSubtreeIfNeeded()
             let maximum = max(0, height - scroll.contentSize.height)

@@ -1,9 +1,14 @@
 import Foundation
 
+enum DemoFixtures {
+    static let activity = "› Help me prepare this project for release.\n\n• I’ll review the setup instructions and check the release build.\n\n• Explored\n  └ Read README.md, Package.swift\n\n✔ You approved codex to run swift build this time\n\n• Ran swift build\n  └ Build complete!\n\n• I’m checking the connection recovery flow."
+    static let output = activity + "\n\n• Ran swift test\n  └ All checks passed.\n\n─ Worked for 24s ─────────────────\n\n• The release checklist is ready.\n\n- Installation instructions\n- Connection recovery\n- Private local settings\n\nYou can switch between machines without losing your draft."
+}
+
 /// Fictional fixtures only. Demo mode never discovers profiles or starts a subprocess.
 actor DemoConnection: HerdrConnection {
     let machine: Machine
-    private var output = "› Help me prepare this project for release.\n\n• The release checklist is ready.\n\n## Ready to share\n\n- Installation instructions\n- Connection recovery\n- Private local settings\n\nYou can switch between machines without losing your draft.\n\n```swift\nlet nextStep = \"Ship something useful\"\n```"
+    private var output = DemoFixtures.output
     init(_ machine: Machine) { self.machine = machine }
     func request(_ method: String, _ params: [String: Any], timeout: TimeInterval) async throws -> [String: Any] {
         switch method {
