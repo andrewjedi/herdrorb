@@ -45,10 +45,11 @@ struct MessageComposer: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
-        let editor = ComposerTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 52))
+        scroll.autohidesScrollers = true
+        let editor = ComposerTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 28))
         editor.isRichText = false
         editor.allowsUndo = true
-        editor.minSize = NSSize(width: 0, height: 52)
+        editor.minSize = NSSize(width: 0, height: 28)
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.drawsBackground = false
         editor.textColor = OrbTheme.nsText
@@ -69,7 +70,14 @@ struct MessageComposer: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? ComposerTextView else { return }
-        if editor.string != text { editor.string = text }
+        if editor.string != text {
+            let selection = editor.selectedRange()
+            let wasAtEnd = selection.length == 0 && NSMaxRange(selection) == (editor.string as NSString).length
+            editor.string = text
+            let length = (text as NSString).length
+            editor.setSelectedRange(NSRange(location: wasAtEnd ? length : min(selection.location, length), length: 0))
+            if wasAtEnd { editor.scrollRangeToVisible(editor.selectedRange()) }
+        }
         editor.send = send
         editor.setAccessibilityLabel(placeholder)
     }

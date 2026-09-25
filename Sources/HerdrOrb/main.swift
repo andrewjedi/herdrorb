@@ -17,6 +17,8 @@ func statusLabel(_ status: String) -> String {
 final class OrbControl: NSView {
     var clicked: (() -> Void)?
     var moved: (() -> Void)?
+    var dragTo: ((NSPoint) -> Void)?
+    var showOptions: (() -> Void)?
     private let model: BubbleModel
     private var startMouse = NSPoint.zero
     private var startOrigin = NSPoint.zero
@@ -46,7 +48,7 @@ final class OrbControl: NSView {
         guard value != hovering else { return }
         hovering = value
         art.rootView = FloatingOrb(model: model, hovered: value)
-        if UserDefaults.standard.bool(forKey: "orbHoverSound") && value && Date().timeIntervalSince(lastChime) > 1 {
+        if model.preferences.bool(forKey: "orbHoverSound") && value && Date().timeIntervalSince(lastChime) > 1 {
             lastChime = Date()
             hoverSound?.stop()
             hoverSound?.play()
@@ -75,7 +77,9 @@ final class OrbControl: NSView {
         return hypot(local.x - bounds.midX, local.y - bounds.midY) <= 43 ? self : nil
     }
     override func accessibilityPerformPress() -> Bool { clicked?(); return true }
+    override func rightMouseDown(with event: NSEvent) { showOptions?() }
     override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) { showOptions?(); return }
         startMouse = NSEvent.mouseLocation
         startOrigin = window?.frame.origin ?? .zero
         dragging = false
@@ -84,14 +88,22 @@ final class OrbControl: NSView {
         let mouse = NSEvent.mouseLocation
         let dx = mouse.x - startMouse.x, dy = mouse.y - startMouse.y
         if hypot(dx, dy) > 4 { dragging = true }
-        if dragging { window?.setFrameOrigin(NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy)) }
+        if dragging {
+            let origin = NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy)
+            if let dragTo { dragTo(origin) } else { window?.setFrameOrigin(origin) }
+        }
     }
     override func mouseUp(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) { return }
         if dragging { moved?() } else { clicked?() }
     }
 }
 
 final class FloatingPanel: NSPanel {
+    var dismiss: (() -> Void)?
+    override func cancelOperation(_ sender: Any?) {
+        if attachedSheet == nil, let dismiss { dismiss() } else { super.cancelOperation(sender) }
+    }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
@@ -105,10 +117,14 @@ final class FloatingPanel: NSPanel {
     var menuItem: NSStatusItem!
     var optionsMenu: NSMenu!
     var orbMenuItem: NSMenuItem!
+    private let orbPopover = NSPopover()
     private var attentionObserver: AnyCancellable?
     private var preferencesObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
     let preferences = AppPreferences.current
+    private lazy var panelEffect = OrbPanelEffect()
+    private let openingSound = OrbChime.make(opening: true)
+    private let closingSound = OrbChime.make(opening: false)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -119,17 +135,44 @@ final class FloatingPanel: NSPanel {
             }
             return
         }
+        if model.isDemo && CommandLine.arguments.contains("--benchmark-orb-effect") {
+            Task {
+                await DesignPreview.prepare(.conversation, model: model)
+                await OrbEffectPreview.benchmark(model: model)
+                AppPreferences.cleanUpPreview(); exit(0)
+            }
+            return
+        }
+        if model.isDemo, let index = CommandLine.arguments.firstIndex(of: "--render-orb-effect"), CommandLine.arguments.indices.contains(index + 1) {
+            Task {
+                do {
+                    await DesignPreview.prepare(.conversation, model: model)
+                    try OrbEffectPreview.render(model: model, directory: CommandLine.arguments[index + 1])
+                    AppPreferences.cleanUpPreview(); exit(0)
+                } catch { fputs("Effect preview failed: \(error)\n", stderr); exit(1) }
+            }
+            return
+        }
         installMainMenu()
-        preferences.register(defaults: ["showOrb": true, "orbHoverSound": true, "orbStatusDot": true])
+        preferences.register(defaults: ["showOrb": true, "orbHoverSound": true, "orbStatusDot": false, "panelGalaxySound": true])
         if model.isDemo && CommandLine.arguments.contains("--panel-only") { preferences.set(false, forKey: "showOrb") }
-        bubble = makePanel(size: NSSize(width: 112, height: 112))
+        bubble = makePanel(size: NSSize(width: 152, height: 152))
         bubble.hasShadow = false
-        let orb = OrbControl(frame: NSRect(x: 0, y: 0, width: 112, height: 112), model: model)
+        let orb = OrbControl(frame: NSRect(x: 0, y: 0, width: 152, height: 152), model: model)
+        orb.showOptions = { [weak self, weak orb] in
+            guard let self, let orb else { return }
+            self.showOrbMenu(relativeTo: orb)
+        }
         orb.clicked = { [weak self] in self?.toggleFromOrb() }
-        orb.moved = { [weak self] in self?.savePosition(); if self?.panel.isVisible == true { self?.positionPanel(byOrb: true, animated: true) } }
+        orb.dragTo = { [weak self] origin in
+            guard let self else { return }
+            self.panelEffect.move(orb: self.bubble, panel: self.panel, to: origin, connected: self.anchoredToOrb)
+        }
+        orb.moved = { [weak self] in self?.savePosition() }
         bubble.contentView = orb
         panel = makePanel(size: model.isDemo ? DesignPreview.panelSize : NSSize(width: OrbTheme.panelWidth, height: OrbTheme.panelHeight), nativeWindow: true)
         panel.delegate = self
+        panel.dismiss = { [weak self] in self?.closePanel() }
         panel.title = "herdrorb"
         if model.isDemo { panel.title = "herdrorb · Fictional demo" }
         panel.contentView = NSHostingView(rootView: PanelView(model: model, placement: placement, close: { [weak self] in self?.closePanel() }, resize: { [weak self] delta in self?.resizePanel(delta) }, preview: DesignPreviewScreen.requested, nativeWindow: true).defaultAppStorage(preferences))
@@ -137,12 +180,15 @@ final class FloatingPanel: NSPanel {
         let savedHeight = preferences.double(forKey: "glassPanelHeight")
         if savedHeight >= 460 { panel.setContentSize(NSSize(width: preferences.object(forKey: "glassPanelWidth") == nil ? OrbTheme.panelWidth : savedWidth, height: min(savedHeight, NSScreen.main?.visibleFrame.height ?? 800))) }
         if let screen = NSScreen.main {
-            var origin = NSPoint(x: screen.visibleFrame.maxX - 132, y: screen.visibleFrame.midY - 56)
+            var origin = NSPoint(x: screen.visibleFrame.maxX - 152, y: screen.visibleFrame.midY - 76)
             if let saved = preferences.string(forKey: "orbPosition") {
-                let candidate = NSPointFromString(saved)
-                if NSScreen.screens.contains(where: { $0.visibleFrame.contains(NSPoint(x: candidate.x + 56, y: candidate.y + 56)) }) { origin = candidate }
+                var candidate = NSPointFromString(saved)
+                if !preferences.bool(forKey: "orbExpandedGlowV1") { candidate.x -= 20; candidate.y -= 20 }
+                if NSScreen.screens.contains(where: { $0.visibleFrame.contains(NSPoint(x: candidate.x + 76, y: candidate.y + 76)) }) { origin = candidate }
             }
             bubble.setFrameOrigin(origin)
+            preferences.set(NSStringFromPoint(origin), forKey: "orbPosition")
+            preferences.set(true, forKey: "orbExpandedGlowV1")
         }
         // Migrate the old wide text item to a compact, consistently named item.
         // A right-edge starting position avoids restoring it behind a crowded notch.
@@ -150,14 +196,14 @@ final class FloatingPanel: NSPanel {
             preferences.set(0, forKey: "NSStatusItem Preferred Position HerdrAgentsMenu")
             preferences.set(true, forKey: "compactMenuItemV1")
         }
-        menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         menuItem.autosaveName = "HerdrAgentsMenu"
         menuItem.isVisible = true
-        menuItem.button?.title = ""
+        menuItem.button?.title = " Herd"
         let statusImage = NSImage(systemSymbolName: "circle.hexagongrid.fill", accessibilityDescription: "Herdr")
         statusImage?.isTemplate = true
         menuItem.button?.image = statusImage
-        menuItem.button?.imagePosition = .imageOnly
+        menuItem.button?.imagePosition = .imageLeading
         menuItem.button?.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         menuItem.button?.setAccessibilityLabel("HERD — Herdr agents")
         menuItem.button?.target = self
@@ -171,8 +217,15 @@ final class FloatingPanel: NSPanel {
         optionsMenu.addItem(.separator())
         optionsMenu.addItem(withTitle: "Quit herdrorb", action: #selector(quit), keyEquivalent: "q").target = self
         updateOrbVisibility()
+        if !model.isDemo || CommandLine.arguments.contains("--enable-demo-hotkey") {
+            PanelHotKey.shared.action = { [weak self] in
+                guard let self else { return }
+                self.toggle(byOrb: self.bubble.isVisible)
+            }
+            PanelHotKey.shared.configure(preferences)
+        }
         preferencesObserver = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: preferences, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.updateOrbVisibility() }
+            Task { @MainActor in self?.updateOrbVisibility(); PanelHotKey.shared.refresh() }
         }
         attentionObserver = model.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async {
@@ -189,6 +242,7 @@ final class FloatingPanel: NSPanel {
         Task {
             if let screen = DesignPreviewScreen.requested {
                 await DesignPreview.prepare(screen, model: model)
+                model.panelVisible = true
                 return
             }
             await model.start()
@@ -197,6 +251,7 @@ final class FloatingPanel: NSPanel {
                 if let first = model.activeSessions.first { await model.choose(first) }
                 DesignPreview.showArtifactFixtureIfRequested()
             }
+            if !model.panelVisible { panelEffect.prepareSnapshot(panel: panel) }
         }
     }
 
@@ -204,6 +259,7 @@ final class FloatingPanel: NSPanel {
         let bar = NSMenu()
         let application = NSMenuItem(); let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About herdrorb", action: #selector(showAbout), keyEquivalent: "").target = self
+        appMenu.addItem(withTitle: "Close panel", action: #selector(closePanel), keyEquivalent: "w").target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit herdrorb", action: #selector(quit), keyEquivalent: "q").target = self
         application.submenu = appMenu; bar.addItem(application)
@@ -221,23 +277,42 @@ final class FloatingPanel: NSPanel {
         Task { await model.refresh() }
     }
     @objc func showAbout() { NSApp.orderFrontStandardAboutPanel(nil); NSApp.activate(ignoringOtherApps: true) }
-    func closePanel() { panel.orderOut(nil); model.panelVisible = false; model.suspendLive(); model.persistCurrent() }
+    @objc func closePanel() {
+        guard model.panelVisible else { return }
+        model.panelVisible = false; model.suspendLive(); model.persistCurrent()
+        playPanelSound(opening: false)
+        panelEffect.animate(open: false, panel: panel, orb: bubble.frame, connected: anchoredToOrb && bubble.isVisible) { }
+    }
+    private func playPanelSound(opening: Bool) {
+        openingSound?.stop(); closingSound?.stop()
+        if preferences.bool(forKey: "panelGalaxySound") { (opening ? openingSound : closingSound)?.play() }
+    }
+    private func showPanel(byOrb: Bool) {
+        positionPanel(byOrb: byOrb)
+        resumePanel()
+        playPanelSound(opening: true)
+        panelEffect.animate(open: true, panel: panel, orb: bubble.frame, connected: byOrb && bubble.isVisible) { [weak self] in
+            guard let self, self.model.panelVisible else { return }
+            self.panel.makeKeyAndOrderFront(nil)
+            self.panelEffect.showConnection(orb: self.bubble.frame, panel: self.panel, connected: self.anchoredToOrb && self.bubble.isVisible)
+        }
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         Task { await model.stop(); AppPreferences.cleanUpPreview(); sender.reply(toApplicationShouldTerminate: true) }
         return .terminateLater
     }
 
     func makePanel(size: NSSize, nativeWindow: Bool = false) -> FloatingPanel {
-        let style: NSWindow.StyleMask = nativeWindow ? [.titled, .closable, .miniaturizable, .resizable, .nonactivatingPanel] : [.borderless, .nonactivatingPanel]
+        let style: NSWindow.StyleMask = nativeWindow ? [.borderless, .resizable, .nonactivatingPanel] : [.borderless, .nonactivatingPanel]
         let window = FloatingPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: style, backing: .buffered, defer: false)
         if nativeWindow {
             window.contentMinSize = NSSize(width: 700, height: 460)
-            window.isMovable = true
+            window.isMovable = false
             window.isReleasedWhenClosed = false
             window.appearance = NSAppearance(named: .darkAqua)
         }
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = true
-        window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
+        window.level = nativeWindow ? OrbWindowLevels.panel : OrbWindowLevels.orb
         window.hidesOnDeactivate = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         return window
@@ -260,6 +335,7 @@ final class FloatingPanel: NSPanel {
         let size = window.contentRect(forFrameRect: window.frame).size
         preferences.set(size.width, forKey: "glassPanelWidth")
         preferences.set(size.height, forKey: "glassPanelHeight")
+        if model.panelVisible { panelEffect.update(orb: bubble.frame, panel: panel, connected: anchoredToOrb && bubble.isVisible) }
     }
     func windowDidMiniaturize(_ notification: Notification) {
         model.panelVisible = false
@@ -270,19 +346,37 @@ final class FloatingPanel: NSPanel {
     func savePosition() { preferences.set(NSStringFromPoint(bubble.frame.origin), forKey: "orbPosition") }
     func updateOrbVisibility() {
         let visible = preferences.bool(forKey: "showOrb")
+        menuItem.isVisible = true
         orbMenuItem.state = visible ? .on : .off
+        orbMenuItem.title = visible ? "Hide orb" : "Show orb"
         if visible { bubble.orderFrontRegardless() } else { bubble.orderOut(nil) }
+        if model.panelVisible { panelEffect.update(orb: bubble.frame, panel: panel, connected: anchoredToOrb && visible) }
     }
     @objc func toggleOrb() {
         preferences.set(!preferences.bool(forKey: "showOrb"), forKey: "showOrb")
         updateOrbVisibility()
     }
-    @objc func statusClicked() {
-        if NSApp.currentEvent?.type == .rightMouseUp, let button = menuItem.button {
-            optionsMenu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.minY), in: button)
-        } else { toggle(byOrb: false) }
+    func showOrbMenu(relativeTo view: NSView) {
+        if orbPopover.isShown { orbPopover.performClose(nil); return }
+        orbPopover.behavior = .transient
+        orbPopover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        orbPopover.contentViewController = NSHostingController(rootView: OrbMenu(model: model, toggle: { [weak self] in
+            self?.orbPopover.performClose(nil)
+            self?.toggleOrb()
+        }, open: { [weak self] in
+            self?.orbPopover.performClose(nil)
+            self?.openFromMenu()
+        }, quit: { [weak self] in self?.quit() }).defaultAppStorage(preferences))
+        orbPopover.show(relativeTo: view.bounds, of: view, preferredEdge: view === menuItem.button ? .minY : .minX)
     }
-    @objc func openFromMenu() { positionPanel(byOrb: false); panel.makeKeyAndOrderFront(nil); resumePanel() }
+    @objc func statusClicked() {
+        guard let button = menuItem.button else { return }
+        showOrbMenu(relativeTo: button)
+    }
+    @objc func openFromMenu() {
+        if model.panelVisible { panel.makeKeyAndOrderFront(nil); return }
+        showPanel(byOrb: bubble.isVisible)
+    }
     private func resumePanel() {
         model.panelVisible = true; model.resumeLive()
         Task { await model.refresh() }
@@ -290,10 +384,8 @@ final class FloatingPanel: NSPanel {
     func toggleFromOrb() { toggle(byOrb: true) }
     func toggle(byOrb: Bool) {
         if panel.isMiniaturized { panel.deminiaturize(nil); panel.makeKeyAndOrderFront(nil); return }
-        if panel.isVisible { closePanel(); return }
-        positionPanel(byOrb: byOrb)
-        panel.makeKeyAndOrderFront(nil)
-        resumePanel()
+        if model.panelVisible { closePanel(); return }
+        showPanel(byOrb: byOrb)
     }
     func positionPanel(byOrb: Bool, animated: Bool = false) {
         anchoredToOrb = byOrb
@@ -302,8 +394,8 @@ final class FloatingPanel: NSPanel {
         let frame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
         let width = min(panel.frame.width, frame.width - 16)
         let height = min(panel.frame.height, frame.height - 24)
-        let rightFits = anchor.midX + 42 + width < frame.maxX
-        let desiredX = byOrb ? (rightFits ? anchor.midX + 42 : anchor.midX - 42 - width) : anchor.maxX - width
+        let rightFits = anchor.midX + 142 + width < frame.maxX
+        let desiredX = byOrb ? (rightFits ? anchor.midX + 142 : anchor.midX - 142 - width) : anchor.maxX - width
         let x = max(frame.minX + 8, min(desiredX, frame.maxX - width - 8))
         let desiredY = byOrb ? anchor.midY - height * 0.4 : frame.maxY - height - 8
         let y = max(frame.minY + 8, min(desiredY, frame.maxY - height - 8))
@@ -329,6 +421,7 @@ final class FloatingPanel: NSPanel {
             updatePlacement()
             panel.setFrame(target, display: true)
         }
+        if model.panelVisible { panelEffect.update(orb: bubble.frame, panel: panel, connected: byOrb && bubble.isVisible) }
     }
     func updatePointer() {
         placement.pointerY = min(panel.frame.height - 40, max(40, panel.frame.maxY - bubble.frame.midY))

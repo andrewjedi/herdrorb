@@ -39,6 +39,8 @@ notarized release is available; do not disable Gatekeeper system-wide.
 4. Choose **Continue**, then select an existing agent or **New session**.
    Agent accounts and sign-in are managed by their CLIs, not by herdrorb.
 
+Press **⌘⇧D** to toggle the panel from any app. Change the shortcut in Settings → Orb → Toggle panel. The borderless panel unfurls from the floating orb with flowing galaxy light; closing draws it back in. Settings also includes a separate switch for its opening and closing sound. Reduce Motion replaces the expansion with a short fade.
+
 The hexagonal menu-bar icon opens the panel even when the orb is hidden. Click
 the orb to open it, drag to reposition it, or right-click the menu-bar icon to
 hide/show the orb or quit. Settings controls appearance, sound, scrolling,
@@ -75,8 +77,25 @@ the missing-Herdr setup state without touching your installations.
 
 ## Everyday use
 
+- In a Codex conversation, ask for an image or a follow-up edit in plain language.
+  The connected CLI uses its native image-generation tool and returns a saved
+  image for inline display. Click the image for a large Quick Look preview, use
+  **Full Screen** or **Open in Preview**, and press Escape or Space to close it.
+  This requires native image generation to be available in that CLI session;
+  herdrorb does not add a separate API key or silently use a paid fallback.
 - Return sends; Shift-Return inserts a newline. Drafts and reading positions are
   retained per session.
+- In Codex and Claude Code conversations, the composer has permissions, model, reasoning-effort,
+  and a lightning-bolt toggle for Fast mode. Choices come from the connected CLI and become
+  active only after the CLI confirms them. The detected agent gets its own models and permission modes. Change settings while it is idle;
+  unsupported or unfamiliar menus can still be handled in Terminal.
+- Ultra is a Codex reasoning effort, separate from Fast speed. Claude uses its own
+  effort levels and permission modes; bypass permissions must be enabled when the
+  Claude session starts. Fast is unavailable when the CLI reports account or
+  organization restrictions. Model choices apply to the current session.
+- Click the microphone to dictate into your draft, then stop and review before
+  sending. macOS requests Microphone and Speech Recognition permission the first
+  time. Dictation stops when you close the panel or switch conversations.
 - Type `/` to use the installed agent's command menu in **Terminal**. Use that
   view for approvals, interactive menus, and sign-in.
 - A device's gear opens connection diagnostics, a custom Herdr path, an agent
@@ -92,6 +111,10 @@ Conversation view reconstructs terminal output. It is not a guaranteed complete
 structured agent history, and it doesn't reproduce Codex desktop's edit/Undo
 cards. Terminal is the authoritative interactive view. Approvals stay with the
 underlying agents; uncertain prompt sends are never automatically retried.
+
+Long conversations initially show the latest 40 messages. **Show earlier messages**
+loads more while preserving your reading position, and search includes the retained
+history. Scrolling upward pauses automatic following; returning to the bottom resumes it.
 
 Conversation text and drafts are saved locally by default, with private file
 permissions and bounded retention, without application-level encryption.

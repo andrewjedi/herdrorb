@@ -5,6 +5,7 @@ actor FakeConnection: HerdrConnection {
     var delay: UInt64 = 0
     var failed = false
     var sends = 0
+    var lastPrompt: String?
     var renameLabel = "1"
     var createCount = 0
     var agentPresent = true
@@ -23,7 +24,9 @@ actor FakeConnection: HerdrConnection {
                                  "agents": agentPresent ? [["pane_id": "p1", "agent": "codex", "agent_status": agentStatus]] : [],
                                  "tabs": [["tab_id": "tab1", "label": renameLabel]], "workspaces": [["workspace_id": "w1", "label": "Project"]]]]
         case "pane.read": return ["read": ["text": "› Hello\n\n• Reply for \(params["pane_id"] as? String ?? "unknown")", "revision": 1]]
-        case "agent.prompt": sends += 1; try await Task.sleep(nanoseconds: 200_000_000); return ["sent": true]
+        case "agent.prompt":
+            sends += 1; lastPrompt = params["text"] as? String
+            try await Task.sleep(nanoseconds: 200_000_000); return ["sent": true]
         case "tab.rename": renameLabel = params["label"] as! String; return ["renamed": true]
         case "tab.create": createCount += 1; return ["root_pane": ["pane_id": "p1"]]
         case "agent.start": throw RPCError(code: "agent_not_ready", message: "Approval required")
@@ -66,6 +69,9 @@ actor FakeConnection: HerdrConnection {
         await send.value
         let count = await fast.sends
         assert(count == 1, "Repeated Return must not duplicate submission")
+        let sentPrompt = await fast.lastPrompt
+        assert(sentPrompt == ConversationImageInstructions.prompt("Keep this draft", kind: "codex"))
+        assert(model.state(first).pending.first?.text == "Keep this draft", "Image display instructions must not leak into pending chat bubbles")
         assert(model.draft == "Second draft", "Completing a send must not clear another draft")
         await model.choose(first)
         await fast.setFailure(true)

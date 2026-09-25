@@ -2,9 +2,17 @@ import AppKit
 
 /// A short, quiet glassy chime with a falling shimmer, synthesized once in memory.
 enum OrbChime {
-    static func make() -> NSSound? {
+    static func make(opening: Bool? = nil) -> NSSound? {
+        if let opening {
+            let packaged = Bundle.main.resourceURL.flatMap { Bundle(url: $0.appendingPathComponent("HerdrOrb_HerdrOrb.bundle")) }
+            guard let url = (packaged ?? Bundle.module).url(forResource: opening ? "PanelOpen" : "PanelClose", withExtension: "wav") else { return nil }
+            let sound = NSSound(contentsOf: url, byReference: false)
+            sound?.volume = 0.32
+            return sound
+        }
         let rate = 44_100
-        let count = Int(Double(rate) * 0.65)
+        let duration = 0.65
+        let count = Int(Double(rate) * duration)
         var pcm = Data()
         func append<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
             var little = value.littleEndian
@@ -18,7 +26,8 @@ enum OrbChime {
             let tone = sin(2 * .pi * 880 * t)
                 + 0.4 * sin(2 * .pi * 1320 * t)
                 + 0.22 * sin(2 * .pi * (2200 * t - 320 * t * t))
-            append(Int16(tone * envelope * 0.16 * 32767), to: &pcm)
+            let value = tone * envelope * 0.16
+            append(Int16(max(-1, min(1, value)) * 32767), to: &pcm)
         }
         var wav = Data("RIFF".utf8)
         append(UInt32(36 + pcm.count), to: &wav)

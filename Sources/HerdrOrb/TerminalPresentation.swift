@@ -1,12 +1,25 @@
 import Foundation
 import CryptoKit
 
-/// Removes only recognizable Codex input chrome at the end of a snapshot.
+/// Presents terminal snapshots as conversation while keeping raw output available.
 /// Leave the original snapshot available in the UI for diagnostics.
 enum TerminalPresentation {
     static func conversation(_ raw: String, kind: String?) -> String {
+        if kind == "claude" { return removingClaudeSettings(raw) }
         guard kind == "codex" else { return raw }
-        var lines = removingStartup(raw.components(separatedBy: "\n"))
+        var lines = removingStartup(removingStatusCards(raw.components(separatedBy: "\n")))
+        var fence: String?
+        lines = lines.filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                let marker = String(trimmed.prefix(3))
+                if fence == marker { fence = nil } else if fence == nil { fence = marker }
+                return true
+            }
+            // Strip the changing CLI timer before merging snapshots. Otherwise
+            // a timer tick can look like new transcript content or even a new turn.
+            return fence != nil || !(trimmed.hasPrefix("Working (") && trimmed.hasSuffix("esc to interrupt)"))
+        }
         let placeholder = lines.lastIndex { line in
             let text = line.trimmingCharacters(in: .whitespaces)
             return text == "›" || (text.hasPrefix("›") && text.contains("Ask Codex to do anything"))
@@ -22,6 +35,63 @@ enum TerminalPresentation {
             }
         }
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func removingClaudeSettings(_ raw: String) -> String {
+        let lines = raw.components(separatedBy: "\n")
+        var result: [String] = []
+        var index = 0
+        var fence: String?
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                let marker = String(trimmed.prefix(3))
+                if fence == marker { fence = nil } else if fence == nil { fence = marker }
+            }
+            if fence == nil, ["❯ /model", "❯ /effort", "❯ /fast", "❯ /fast on", "❯ /fast off"].contains(trimmed), index + 1 < lines.count {
+                let response = lines[index + 1].trimmingCharacters(in: .whitespaces)
+                let commandResponse = response.hasPrefix("⎿") && ["Kept model as ", "Set model to ", "Cancelled", "Fast mode ON", "Fast mode OFF", "Set effort to ", "Effort set to "].contains { response.dropFirst().trimmingCharacters(in: .whitespaces).hasPrefix($0) }
+                if commandResponse { index += 2; continue }
+            }
+            result.append(line)
+            index += 1
+        }
+        return result.joined(separator: "\n")
+    }
+
+    /// The native settings controls ask the CLI for /status. Its boxed account and
+    /// configuration report belongs in Terminal, not in the conversation transcript.
+    private static func removingStatusCards(_ lines: [String]) -> [String] {
+        var result: [String] = []
+        var index = 0
+        var fence: String?
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                let marker = String(trimmed.prefix(3))
+                if fence == marker { fence = nil } else if fence == nil { fence = marker }
+                result.append(line); index += 1; continue
+            }
+            if fence == nil, trimmed.hasPrefix("╭") || trimmed.hasPrefix("┌"),
+               let end = lines.indices.dropFirst(index + 1).prefix(80).first(where: {
+                   let row = lines[$0].trimmingCharacters(in: .whitespaces)
+                   return row.hasPrefix("╰") || row.hasPrefix("└")
+               }) {
+                let card = lines[index...end].joined(separator: "\n")
+                let preceding = result.lastIndex { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                let command = preceding.map { result[$0].trimmingCharacters(in: .whitespaces) }
+                if card.contains("OpenAI Codex (v"), card.contains("Model:"), card.contains("Permissions:"),
+                   command == "/status" || command == "› /status" || result.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                    if let preceding, command == "/status" || command == "› /status" { result.removeSubrange(preceding...) }
+                    index = end + 1
+                    continue
+                }
+            }
+            result.append(line); index += 1
+        }
+        return result
     }
 
     private static func removingStartup(_ lines: [String]) -> [String] {
@@ -72,6 +142,21 @@ struct MessagePart: Equatable, Sendable {
     var status: Bool
 }
 
+/// Bound initial SwiftUI layout without discarding searchable/saved history.
+/// Pin by message identity while reading so incoming replies cannot slide the
+/// top of the document out from underneath the reader.
+enum ConversationWindow {
+    static let pageSize = 40
+    static func start(in messages: [SessionMessage], anchor: String?) -> Int {
+        if let anchor, let index = messages.firstIndex(where: { $0.id == anchor }) { return index }
+        return max(0, messages.count - pageSize)
+    }
+    static func latestAnchor(in messages: [SessionMessage]) -> String? {
+        guard !messages.isEmpty else { return nil }
+        return messages[max(0, messages.count - pageSize)].id
+    }
+}
+
 /// A reversible presentation of terminal cells. Raw messages remain untouched for
 /// search, caching, and the activity disclosure; this is not structured reasoning.
 struct ConversationResponse: Equatable {
@@ -79,6 +164,27 @@ struct ConversationResponse: Equatable {
     var activity: String
     var duration: String?
     var artifacts: [ArtifactReference] { TerminalPresentation.artifacts(answer) }
+}
+
+/// A presentation contract sent with conversation prompts, including follow-up
+/// edits such as “make it blue”. Generation remains in the existing CLI session.
+enum ConversationImageInstructions {
+    static let start = "<herdrorb-image-display>"
+    static let end = "</herdrorb-image-display>"
+    static func prompt(_ text: String, kind: String?) -> String {
+        guard kind == "codex" else { return text }
+        return text + "\n\n" + start + "\n" + """
+        This conversation supports inline local images and clickable Mac previews. When the user requests image generation or editing, use your native image generation tool if available. After it succeeds, include each resulting image in your final answer as ![description](<absolute file path>), using the actual saved file on this machine. Do not return only an image attachment: this viewer needs the file path. Preserve the image for later viewing and follow-up edits. If generation is unavailable or fails, explain that honestly; do not silently switch to an API-key or external paid fallback. For other requests, respond normally.
+        """ + "\n" + end
+    }
+    static func userText(_ text: String) -> String {
+        // Only remove our complete trailing block; preserve quoted examples and
+        // incomplete terminal snapshots until the end marker arrives.
+        let lines = text.components(separatedBy: "\n")
+        guard lines.last?.trimmingCharacters(in: .whitespaces) == end,
+              let index = lines.lastIndex(where: { $0.trimmingCharacters(in: .whitespaces) == start }) else { return text }
+        return lines.prefix(index).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 extension TerminalPresentation {
@@ -116,6 +222,15 @@ extension TerminalPresentation {
                     continue
                 }
                 if status.range(of: #"^[Dd]one \d{1,2}:\d{2}(?:\s*[APap][Mm])?$"#, options: .regularExpression) != nil { continue }
+                if trimmed == "— Live terminal view —" {
+                    flush()
+                    tool = true
+                    continue
+                }
+                if status.range(of: #"^Working\s*\(.*esc to interrupt\)$"#, options: .regularExpression) != nil {
+                    flush()
+                    continue
+                }
                 let marked = line.hasPrefix("• ") || line.hasPrefix("● ")
                 let approved = line.hasPrefix("✔ ") || line.hasPrefix("✓ ")
                 if marked || approved {
@@ -226,9 +341,23 @@ extension TerminalPresentation {
         if live.isEmpty || history.contains(live) { return history }
         if live.contains(history) { return live }
         let old = history.components(separatedBy: "\n"), new = live.components(separatedBy: "\n")
-        for size in stride(from: min(old.count, new.count), through: 2, by: -1) {
-            if Array(old.suffix(size)) == Array(new.prefix(size)) { return (old + new.dropFirst(size)).joined(separator: "\n") }
+        // KMP finds the longest suffix/prefix overlap in linear time. Repeated
+        // terminal lines previously allocated and compared every candidate suffix.
+        var prefix = [Int](repeating: 0, count: new.count)
+        if new.count > 1 {
+            for index in 1..<new.count {
+                var matched = prefix[index - 1]
+                while matched > 0 && new[index] != new[matched] { matched = prefix[matched - 1] }
+                if new[index] == new[matched] { matched += 1 }
+                prefix[index] = matched
+            }
         }
+        var overlap = 0
+        for line in old {
+            while overlap > 0 && (overlap == new.count || line != new[overlap]) { overlap = prefix[overlap - 1] }
+            if line == new[overlap] { overlap += 1 }
+        }
+        if overlap >= 2 { return (old + new.dropFirst(overlap)).joined(separator: "\n") }
         // Same viewport with an evolving final response: replace its matching suffix.
         let minimum = min(3, new.count)
         if minimum > 0 {
@@ -244,7 +373,7 @@ extension TerminalPresentation {
     }
 
     /// Terminal-derived grouping, not a claim of structured agent history.
-    static func messages(_ raw: String, kind: String?) -> [SessionMessage] {
+    static func messages(_ raw: String, kind: String?, previous: [SessionMessage] = []) -> [SessionMessage] {
         let cleaned = conversation(raw, kind: kind)
         let lines = cleaned.components(separatedBy: "\n")
         let marker = kind == "codex" ? "› " : "❯ "
@@ -254,8 +383,10 @@ extension TerminalPresentation {
         var anchor = "leading"
         var ordinal = 0
         var occurrences: [String: Int] = [:]
+        let existing = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         func flush() {
-            let text = buffer.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            var text = buffer.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if user && kind == "codex" { text = ConversationImageInstructions.userText(text) }
             if !text.isEmpty {
                 if user {
                     let hash = String(SHA256.hash(data: Data(text.utf8)).description)
@@ -263,12 +394,43 @@ extension TerminalPresentation {
                     anchor = "\(hash)-\(count)"; ordinal = 0
                 }
                 let identity = "\(anchor)-\(user ? "user" : "reply")-\(ordinal)"
-                result.append(SessionMessage(id: identity, fromUser: user, text: text, parts: parts(text, fromUser: user), artifacts: user ? [] : artifacts(text))); ordinal += 1
+                if let old = existing[identity], old.fromUser == user, old.text == text {
+                    result.append(old)
+                } else {
+                    result.append(SessionMessage(id: identity, fromUser: user, text: text, parts: parts(text, fromUser: user), artifacts: user ? [] : artifacts(text)))
+                }
+                ordinal += 1
             }
             buffer = []
         }
         var inCode = false
+        var skippingFooter = false
         for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if kind == "codex" && !inCode {
+                // Empty CLI composers can occur anywhere in accumulated snapshots.
+                // They are UI, never a sent user message.
+                let emptyPrompt = trimmed == "›" || (trimmed.hasPrefix("›") && trimmed.contains("Ask Codex to do anything"))
+                if emptyPrompt {
+                    flush()
+                    user = false
+                    skippingFooter = true
+                    continue
+                }
+                let boundary = trimmed == "— Live terminal view —"
+                let cell = line.hasPrefix(marker) || line.hasPrefix("• ") || line.hasPrefix("● ") || line.hasPrefix("✔ ") || line.hasPrefix("✓ ")
+                let status = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "─━ "))
+                let completion = status.hasPrefix("Worked for ")
+                if skippingFooter {
+                    if boundary || cell || completion { skippingFooter = false }
+                    else { continue }
+                }
+                let transient = status.range(of: #"^Working\s*\(.*esc to interrupt\)$"#, options: .regularExpression) != nil
+                if boundary || completion || transient {
+                    if user { flush(); user = false }
+                }
+                if transient { continue }
+            }
             if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") { inCode.toggle() }
             if line.hasPrefix(marker) && !inCode {
                 flush(); user = true; buffer.append(String(line.dropFirst(marker.count)))

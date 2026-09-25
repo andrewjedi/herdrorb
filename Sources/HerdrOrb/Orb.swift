@@ -4,6 +4,7 @@ import MetalKit
 struct PearlOrb: NSViewRepresentable {
     var hovered = false
     var variant: Float = 0
+    var canvasScale: Float = 1
     func makeNSView(context: Context) -> MTKView {
         let view = OrbMetalView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.clearColor = MTLClearColorMake(0, 0, 0, 0)
@@ -16,6 +17,7 @@ struct PearlOrb: NSViewRepresentable {
     func updateNSView(_ view: MTKView, context: Context) {
         context.coordinator.renderer?.hovered = hovered
         context.coordinator.renderer?.variant = variant
+        context.coordinator.renderer?.canvasScale = canvasScale
         (view as? OrbMetalView)?.updateActivity()
     }
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -37,6 +39,7 @@ final class OrbMetalView: MTKView {
     func updateActivity() {
         let visible = window?.isVisible == true && !isHiddenOrHasHiddenAncestor
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        (delegate as? OrbRenderer)?.reduceMotion = reduceMotion
         isPaused = !visible || reduceMotion
         enableSetNeedsDisplay = reduceMotion
         if reduceMotion && visible { setNeedsDisplay(bounds) }
@@ -57,7 +60,9 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
     var hovered = false
     var variant: Float = 0
     private var hoverAmount: Float = 0
-    let start = Date()
+    var reduceMotion = false
+    var canvasScale: Float = 1
+    let start = CACurrentMediaTime()
     init?(_ view: MTKView) {
         guard let device = view.device, let queue = device.makeCommandQueue() else { return nil }
         let source = """
@@ -89,24 +94,37 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
         float2 rotate(float2 p,float a) {
             return float2(cos(a)*p.x-sin(a)*p.y,sin(a)*p.x+cos(a)*p.y);
         }
-        fragment float4 fragmentMain(V v [[stage_in]], constant float &time [[buffer(0)]], constant float &hover [[buffer(1)]], constant float &variant [[buffer(2)]], constant uint &hasArtwork [[buffer(3)]], texture2d<float> artwork [[texture(0)]]) {
-            float2 p=v.uv;
+        fragment float4 fragmentMain(V v [[stage_in]], constant float &time [[buffer(0)]], constant float &hover [[buffer(1)]], constant float &variant [[buffer(2)]], constant uint &hasArtwork [[buffer(3)]], constant float &canvasScale [[buffer(4)]], texture2d<float> artwork [[texture(0)]]) {
+            float2 p=v.uv * canvasScale;
             if (hasArtwork != 0) {
                 // The three generated art cells preserve the approved material.
                 // Only interior wisps move; the glass silhouette stays circular.
                 constexpr sampler artSampler(coord::normalized, address::clamp_to_edge, filter::linear);
                 p /= 1. + hover * .035;
                 float r = length(p);
-                float interior = 1. - smoothstep(.4, .78, r);
-                float2 flow = float2(sin(time*.21+p.y*3.)-sin(p.y*3.), cos(time*.17+p.x*3.)-cos(p.x*3.)) * .004 * interior;
+                float interior = 1. - smoothstep(.58, .79, r);
+                float speed = variant < .5 ? .29 : (variant < 1.5 ? .24 : .33);
+                // Rotate the existing galaxy beneath a stationary glass shell.
+                float2 galaxy = rotate(p, time * speed + .07*sin(time*.65-r*5.));
+                float2 drift = float2(sin(time*.9+galaxy.y*4.), cos(time*.73+galaxy.x*4.)) * .016 * interior;
                 float centerX = variant < .5 ? .5283 : (variant < 1.5 ? .4896 : .4572);
-                float2 local = float2(centerX, .464) + float2(p.x, -p.y) * .415 + flow;
-                float2 uv = float2((floor(variant+.5)+local.x)/3., local.y);
-                float3 color = artwork.sample(artSampler, uv).rgb;
-                color *= 1. + .025*sin(time*.4)*interior + hover*.12;
+                float cell = floor(variant+.5);
+                float2 baseLocal = float2(centerX, .464) + float2(p.x, -p.y) * .415;
+                float2 movingLocal = float2(centerX, .464) + float2(galaxy.x, -galaxy.y) * .415 + drift;
+                float3 shell = artwork.sample(artSampler, float2((cell+clamp(baseLocal.x,.001,.999))/3., clamp(baseLocal.y,.001,.999))).rgb;
+                float3 moving = artwork.sample(artSampler, float2((cell+movingLocal.x)/3., movingLocal.y)).rgb;
+                shell *= 1.-smoothstep(.92,1.03,r);
+                float3 color = mix(shell, moving, interior);
+                color *= 1. + .035*sin(time*1.1)*interior + hover*.12;
                 float core = 1. - smoothstep(.79, .825, r);
-                float alpha = max(core, max(color.r, max(color.g, color.b)));
-                return float4(saturate(color), saturate(alpha));
+                float alpha = saturate(max(core, max(color.r, max(color.g, color.b))));
+                // A broader, softly breathing halo uses the existing palette.
+                float3 tint = variant < .5 ? float3(.52,.22,1.) : (variant < 1.5 ? float3(.08,.78,.66) : float3(1.,.24,.16));
+                float halo = exp(-pow(max(0.,r-.82)/.22,2.)) * smoothstep(.77,.84,r);
+                halo *= (.34 + hover*.12) * (.94+.06*sin(time*1.5));
+                float fade = 1.-smoothstep(canvasScale*.92,canvasScale*.995,r);
+                float3 luminous = saturate(color) + tint*halo*(1.-alpha);
+                return float4(luminous*fade, (alpha+halo*(1.-alpha))*fade);
             }
             float r=length(p), radius=.82;
             float edge=1.-smoothstep(radius-.008,radius+.008,r);
@@ -241,7 +259,7 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
     }
     /// Render the production shader into a readable texture for deterministic
     /// UI snapshots. NSView.cacheDisplay cannot include a CAMetalLayer.
-    static func snapshot(variant: Float, time: Float = 0, pixels: Int = 320) -> NSImage? {
+    static func snapshot(variant: Float, time: Float = 0, pixels: Int = 320, canvasScale: Float = 1) -> NSImage? {
         guard let device = MTLCreateSystemDefaultDevice() else { return nil }
         let view = MTKView(frame: .zero, device: device)
         view.colorPixelFormat = .bgra8Unorm
@@ -256,10 +274,11 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
         guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return nil }
-        var time = time, variant = variant, hover: Float = 0
+        var time = time, variant = variant, hover: Float = 0, canvasScale = canvasScale
         encoder.setRenderPipelineState(renderer.pipeline)
         var hasArtwork: UInt32 = renderer.artworkTexture == nil ? 0 : 1
         encoder.setFragmentBytes(&hasArtwork, length: 4, index: 3)
+        encoder.setFragmentBytes(&canvasScale, length: 4, index: 4)
         encoder.setFragmentTexture(renderer.artworkTexture, index: 0)
         encoder.setFragmentBytes(&time, length: 4, index: 0)
         encoder.setFragmentBytes(&hover, length: 4, index: 1)
@@ -280,11 +299,13 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
     func draw(in view: MTKView) {
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
-        var time = Float(Date().timeIntervalSince(start))
+        var time = reduceMotion ? Float(0) : Float(CACurrentMediaTime() - start)
+        var canvasScale = canvasScale
         hoverAmount += ((hovered ? 1 : 0) - hoverAmount) * 0.12
         encoder.setRenderPipelineState(pipeline)
         var hasArtwork: UInt32 = artworkTexture == nil ? 0 : 1
         encoder.setFragmentBytes(&hasArtwork, length: 4, index: 3)
+        encoder.setFragmentBytes(&canvasScale, length: 4, index: 4)
         encoder.setFragmentTexture(artworkTexture, index: 0)
         encoder.setFragmentBytes(&time, length: MemoryLayout<Float>.size, index: 0)
         encoder.setFragmentBytes(&hoverAmount, length: MemoryLayout<Float>.size, index: 1)

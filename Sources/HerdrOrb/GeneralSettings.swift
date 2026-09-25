@@ -8,8 +8,9 @@ struct GeneralSettings: View {
     @State private var clearing = false
     @AppStorage("automaticallyScrollToNewMessages") private var automaticallyScroll = true
     @AppStorage("orbStyle") private var style = OrbStyle.nebula.rawValue
-    @AppStorage("orbStatusDot") private var showStatus = true
+    @AppStorage("orbStatusDot") private var showStatus = false
     @AppStorage("orbHoverSound") private var hoverSound = true
+    @AppStorage("panelGalaxySound") private var galaxySound = true
     @AppStorage("showOrb") private var showOrb = true
 
     var body: some View {
@@ -49,6 +50,10 @@ struct GeneralSettings: View {
                                     OrbStatus(text: "Offline", color: OrbTheme.danger)
                                 }
                             }
+                            OrbRule()
+                            PanelShortcutSetting()
+                            OrbRule()
+                            setting("Play galaxy sound when opening and closing", value: $galaxySound)
                             OrbRule()
                             setting("Play a sound on hover", value: $hoverSound)
                             OrbRule()

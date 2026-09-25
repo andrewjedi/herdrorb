@@ -92,7 +92,7 @@ struct ArtifactCard: View {
     @State private var error: String?
     @State private var thumbnail: NSImage?
     @State private var imageError: String?
-    @State private var localFile: URL?
+    @State private var imageLoadID: UUID?
     @AppStorage("automaticImagePreviews") private var automaticImages = true
     @State private var imageLoading = false
     private var imageTaskID: String { [machine.identity, cwd ?? "", artifact.path, String(automaticImages)].joined(separator: "|") }
@@ -100,24 +100,14 @@ struct ArtifactCard: View {
         VStack(alignment: .leading, spacing: 6) {
             if artifact.isImage { imagePreview }
             HStack(spacing: 10) {
-                Image(systemName: "doc.richtext").font(.system(size: 20)).foregroundStyle(OrbTheme.secondary)
+                Image(systemName: artifact.isImage ? "photo" : "doc.richtext").font(.system(size: 20)).foregroundStyle(OrbTheme.secondary)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(artifact.name).font(.system(size: 14, weight: .medium)).lineLimit(2)
+                    Text(artifact.isImage && artifact.path.contains("/generated_images/") ? "Generated image" : artifact.name)
+                        .font(.system(size: 14, weight: .medium)).lineLimit(2)
                     Text(machine.label).font(.system(size: 12)).foregroundStyle(OrbTheme.secondary)
                 }
                 Spacer(minLength: 6)
-                Button {
-                    loading = true; error = nil
-                    Task { @MainActor in
-                        defer { loading = false }
-                        do {
-                            let file: URL
-                            if let localFile { file = localFile }
-                            else { file = try await ArtifactFiles.shared.fetch(artifact, machine: machine, cwd: cwd) }
-                            ArtifactPreview.shared.show(file, source: machine.label)
-                        } catch { self.error = error.localizedDescription }
-                    }
-                } label: { Text(loading ? "Loading…" : "Preview").font(.system(size: 11)) }
+                Button(action: openPreview) { Text(loading ? "Loading…" : "Preview").font(.system(size: 11)) }
                     .disabled(loading).buttonStyle(OrbButtonStyle(compact: true))
                     .help(machine.id == "local" ? "Preview this file" : "Fetch this file from \(machine.label) and preview it here")
             }
@@ -125,6 +115,7 @@ struct ArtifactCard: View {
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(OrbTheme.controlEdge, lineWidth: 0.8))
             .help(artifact.path)
             .task(id: imageTaskID) {
+                imageLoadID = nil; imageLoading = false; thumbnail = nil; imageError = nil
                 if artifact.isImage && automaticImages { await loadImage() }
             }
             .sheet(isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
@@ -137,30 +128,47 @@ struct ArtifactCard: View {
                 ZStack {
                     OrbTheme.canvas
                     if let thumbnail {
-                        Image(nsImage: thumbnail).resizable().scaledToFit()
-                            .accessibilityLabel("Image: \(artifact.name)")
-                            .onTapGesture { if let localFile { ArtifactPreview.shared.show(localFile, source: machine.label) } }
+                        Button(action: openPreview) {
+                            Image(nsImage: thumbnail).resizable().scaledToFit()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .contentShape(Rectangle())
+                        }.buttonStyle(.plain).disabled(loading)
+                            .accessibilityLabel("Preview image: \(artifact.name)")
+                            .accessibilityHint("Open a larger preview with full-screen controls")
+                            .help("Click to enlarge · Full Screen and Open in Preview available")
                     } else if let imageError {
                         ArtifactErrorView(title: "Couldn’t load image", detail: imageError, symbol: "photo", actionTitle: "Retry image") {
                             Task { await loadImage() }
                         }.padding(20)
                     } else if imageLoading { ProgressView("Loading image…").controlSize(.small).font(.system(size: 11)) }
                     else { Button("Load image") { Task { await loadImage() } }.buttonStyle(OrbButtonStyle(compact: true)) }
-                }.frame(height: 220).frame(maxWidth: .infinity).clipShape(RoundedRectangle(cornerRadius: 7))
+                }.frame(height: 200).frame(maxWidth: .infinity).clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+    private func openPreview() {
+        guard !loading else { return }
+        loading = true; error = nil
+        Task { @MainActor in
+            defer { loading = false }
+            do {
+                let file = try await ArtifactFiles.shared.fetch(artifact, machine: machine, cwd: cwd)
+                ArtifactPreview.shared.show(file, source: machine.label)
+            } catch { self.error = error.localizedDescription }
+        }
     }
     @MainActor private func loadImage() async {
-        guard !imageLoading else { return }
+        let request = UUID()
+        imageLoadID = request
         imageLoading = true
-        defer { imageLoading = false }
+        defer { if imageLoadID == request { imageLoading = false } }
         imageError = nil
         do {
             let file = try await ArtifactFiles.shared.fetch(artifact, machine: machine, cwd: cwd)
             let image = try await ArtifactThumbnail.load(file)
             try Task.checkCancellation()
-            localFile = file
+            guard imageLoadID == request else { return }
             thumbnail = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
         } catch is CancellationError { }
-        catch { imageError = error.localizedDescription }
+        catch { if imageLoadID == request { imageError = error.localizedDescription } }
     }
 }
 
@@ -168,17 +176,22 @@ struct ArtifactCard: View {
     static let shared = ArtifactPreview()
     private var windows: [NSWindow] = []
     func show(_ url: URL, source: String) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 620), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        if let existing = windows.first(where: { $0.representedURL == url }) {
+            NSApp.activate(ignoringOtherApps: true); existing.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = ArtifactPreviewWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 740), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        window.representedURL = url
+        window.collectionBehavior.insert(.fullScreenPrimary)
+        window.minSize = NSSize(width: 420, height: 320)
         window.title = "\(url.lastPathComponent) · \(source)"
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = OrbTheme.nsCanvas
         window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
         window.isReleasedWhenClosed = false
-        let preview = QLPreviewView(frame: window.contentView!.bounds, style: .normal)!
-        preview.autoresizingMask = [.width, .height]
-        preview.autostarts = false
-        preview.previewItem = url as NSURL
-        window.contentView = preview
+        window.contentView = NSHostingView(rootView: ArtifactPreviewContent(url: url, fullScreen: { [weak window] in
+            window?.toggleFullScreen(nil)
+        }, close: { [weak window] in window?.close() }).preferredColorScheme(.dark))
         window.delegate = self; windows.append(window)
         window.center(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
         if ["md", "markdown"].contains(url.pathExtension.lowercased()) {
@@ -191,8 +204,72 @@ struct ArtifactCard: View {
             }
         }
     }
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        (notification.object as? NSWindow)?.level = .normal
+    }
+    func windowDidExitFullScreen(_ notification: Notification) {
+        (notification.object as? NSWindow)?.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
+    }
     func windowWillClose(_ notification: Notification) {
         if let window = notification.object as? NSWindow { windows.removeAll { $0 === window } }
+    }
+}
+
+/// Quick Look keeps the full-resolution file available without making the chat
+/// retain a full-resolution bitmap. Space and Escape behave like Finder preview.
+final class ArtifactPreviewWindow: NSWindow {
+    override func cancelOperation(_ sender: Any?) { close() }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 || (event.keyCode == 49 && event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty) {
+            close()
+        } else { super.keyDown(with: event) }
+    }
+}
+
+struct ArtifactQuickLook: NSViewRepresentable {
+    let url: URL
+    func makeNSView(context: Context) -> QLPreviewView {
+        let view = QLPreviewView(frame: .zero, style: .normal)!
+        view.autostarts = false
+        view.shouldCloseWithWindow = true
+        view.previewItem = url as NSURL
+        return view
+    }
+    func updateNSView(_ view: QLPreviewView, context: Context) {
+        if (view.previewItem as? NSURL) != url as NSURL { view.previewItem = url as NSURL }
+    }
+}
+
+struct ArtifactPreviewContent: View {
+    let url: URL
+    var fullScreen: () -> Void
+    var close: () -> Void
+    @State private var openError: String?
+    private var isImage: Bool { ArtifactReference(path: url.path).isImage }
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text(url.lastPathComponent).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 8)
+                Button { openFile() } label: {
+                    Label(isImage ? "Open in Preview" : "Open File", systemImage: "arrow.up.forward.app")
+                }
+                Button(action: fullScreen) { Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right") }
+                Button(action: close) { Image(systemName: "xmark") }.accessibilityLabel("Close preview")
+            }.buttonStyle(OrbButtonStyle(compact: true)).padding(12)
+            OrbRule()
+            ArtifactQuickLook(url: url).frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let openError { Text(openError).font(.system(size: 12)).foregroundStyle(OrbTheme.warning).padding(10) }
+        }.background(OrbTheme.canvas).foregroundStyle(OrbTheme.text)
+            .onExitCommand(perform: close)
+    }
+    private func openFile() {
+        openError = nil
+        if isImage, let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Preview") {
+            NSWorkspace.shared.open([url], withApplicationAt: app, configuration: .init()) { _, error in
+                if let error { Task { @MainActor in openError = error.localizedDescription } }
+            }
+        } else if !NSWorkspace.shared.open(url) { openError = "Couldn’t open this file. It may have been moved or deleted." }
     }
 }
 

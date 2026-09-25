@@ -23,7 +23,7 @@ struct PopoverShape: Shape {
     }
     func path(in rect: CGRect) -> Path {
         let body = rect.insetBy(dx: nativeWindow ? 0 : 14, dy: 0)
-        var path = Path(roundedRect: body, cornerRadius: nativeWindow ? 0 : 20)
+        var path = Path(roundedRect: body, cornerRadius: 20)
         if showPointer {
             let y = min(rect.height - 35, max(35, pointerY))
             // Retract the old pointer and extend the new one when changing sides.
@@ -89,6 +89,7 @@ struct PanelView: View {
     @State private var creating = false
     @State private var kind = "codex"
     @State private var directory = ""
+    @FocusState private var focusedDeviceSettings: String?
     @State private var hoveredMachine: String?
     @State private var hoveredSession: String?
     @State private var renaming: Agent?
@@ -100,7 +101,7 @@ struct PanelView: View {
     @State private var checkingFolder = false
     var displayedMachineID: String { model.selected?.machineID ?? model.selectedMachineID }
     var machinesWithSessions: Set<String> { Set(model.activeSessions.map(\.machineID)) }
-    var machineName: String { model.machines.first { $0.id == displayedMachineID }?.label ?? "Your Macs" }
+    var machineName: String { model.machines.first { $0.id == displayedMachineID }?.label ?? "Your devices" }
     private var isCreating: Bool { creating || preview == .newSession || preview == .recovery }
     private var hasFailedLaunch: Bool { model.failedLaunches[machineID] != nil }
     private var isSettings: Bool { showingGeneralSettings || preview == .settings || preview == .privacy }
@@ -149,7 +150,7 @@ struct PanelView: View {
         .padding(.horizontal, nativeWindow ? 0 : 14)
         .frame(minWidth: 700, maxWidth: .infinity, minHeight: 460, maxHeight: .infinity)
         .background(OrbTheme.canvas, in: shape).clipShape(shape)
-        .overlay(shape.stroke(Color(hex: 0x60616D), lineWidth: 0.85))
+        .overlay(shape.stroke(LinearGradient(colors: [OrbTheme.accentLight, OrbTheme.accent.opacity(0.45), OrbTheme.accentLight.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1))
         .foregroundStyle(OrbTheme.text).font(OrbTheme.bodyFont).tint(OrbTheme.accent).preferredColorScheme(.dark)
         .onChange(of: machinesWithSessions) { old, new in
             for id in old.symmetricDifference(new) { expansionOverrides.removeValue(forKey: id) }
@@ -184,38 +185,35 @@ struct PanelView: View {
                 .padding(.trailing, 12)
             Text("Settings").font(OrbTheme.titleFont)
             Spacer()
-            Button(action: close) { Image(systemName: "xmark").font(.system(size: 19, weight: .light)).frame(width: 26, height: 32) }
-                .buttonStyle(.plain).help("Close pop-out").accessibilityLabel("Close pop-out")
         }.padding(.horizontal, OrbTheme.inset).frame(height: 58)
     }
 
     var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("herdrorb").font(.system(size: 14, weight: .light)).foregroundStyle(OrbTheme.accent)
-                .frame(maxWidth: .infinity).padding(.top, 18).padding(.bottom, 19)
-                .help(model.isDemo ? "Demo mode: fictional sessions only" : "herdrorb")
-            Text("Your Macs").font(.system(size: 23, weight: .semibold))
-            Text("\(model.connection.values.filter { $0 == .online }.count) connected")
-                .font(.system(size: 14)).foregroundStyle(OrbTheme.secondary).padding(.top, 4)
-            OrbRule().padding(.top, 17).padding(.bottom, 9)
+            HStack(alignment: .firstTextBaseline) {
+                Text("Your devices").font(.system(size: 17, weight: .semibold))
+                Spacer(minLength: 4)
+                Text("\(model.connection.values.filter { $0 == .online }.count) connected")
+                    .font(.system(size: 11)).foregroundStyle(OrbTheme.secondary)
+            }.padding(.top, 22)
+            OrbRule().padding(.top, 15).padding(.bottom, 9)
             ScrollView {
-                VStack(spacing: 18) { ForEach(model.machines) { machine in machineRow(machine) } }
+                VStack(spacing: 10) { ForEach(model.machines) { machine in machineRow(machine) } }
             }.scrollIndicators(.hidden)
-            Spacer(minLength: 18)
-            Button { beginSession(on: displayedMachineID) } label: {
-                Label("New session", systemImage: "plus").font(.system(size: 15)).frame(maxWidth: .infinity, alignment: .leading).frame(height: 4)
-            }.buttonStyle(OrbButtonStyle(kind: isCreating ? .selected : .secondary)).disabled(model.showingSetup || !model.connection.values.contains(.online))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(isCreating ? OrbTheme.selectionEdge : .clear))
-            HStack(spacing: 4) {
+            Spacer(minLength: 14)
+            HStack(spacing: 10) {
+                Button { beginSession(on: displayedMachineID) } label: {
+                    Label("New session", systemImage: "plus").font(.system(size: 12)).fixedSize()
+                }.buttonStyle(OrbButtonStyle(kind: isCreating ? .selected : .secondary, compact: true))
+                    .disabled(model.showingSetup || !model.connection.values.contains(.online))
+                Spacer(minLength: 0)
                 Button { model.showingSetup = false; showingGeneralSettings = true } label: {
-                    Label("Settings", systemImage: "gearshape").font(.system(size: 14)).frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 9).padding(.horizontal, 8)
-                        .background(isSettings ? OrbTheme.selection : .clear, in: RoundedRectangle(cornerRadius: 8))
+                    Label("Settings", systemImage: "gearshape").font(.system(size: 12)).fixedSize()
+                        .padding(.vertical, 8)
                 }.buttonStyle(.plain).help("General settings")
-                Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise").font(.system(size: 19)).frame(width: 28, height: 32) }
-                    .buttonStyle(.plain).disabled(model.refreshing).help("Refresh machines").accessibilityLabel("Refresh machines")
-            }.foregroundStyle(OrbTheme.secondary).padding(.top, 17)
-        }.padding(.horizontal, 23).padding(.bottom, 24).background(ObservatorySidebar())
+                    .foregroundStyle(isSettings ? OrbTheme.text : OrbTheme.secondary)
+            }
+        }.padding(.horizontal, 17).padding(.bottom, 20).background(ObservatorySidebar())
     }
     func machineRow(_ machine: Machine) -> some View {
         let selected = (isCreating ? machineID : displayedMachineID) == machine.id
@@ -223,7 +221,7 @@ struct PanelView: View {
         let expanded = expansionOverrides[machine.id] ?? !sessions.isEmpty
         let attention = sessions.filter { $0.agent_status == "blocked" || model.state($0).unread }.count
         let online = model.connection[machine.id] == .online
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 3) {
                 Button {
                     machineID = machine.id
@@ -231,39 +229,45 @@ struct PanelView: View {
                     withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { expansionOverrides[machine.id] = !expanded }
                 } label: {
                     HStack(spacing: 10) {
-                        Image(systemName: machine.id == "local" ? "laptopcomputer" : "desktopcomputer").font(.system(size: 24, weight: .light)).frame(width: 30)
+                        Image(systemName: machine.id == "local" ? "laptopcomputer" : "desktopcomputer").font(.system(size: 15, weight: .regular)).frame(width: 18)
                         Circle().fill(online ? OrbTheme.online : OrbTheme.warning).frame(width: 7, height: 7).accessibilityHidden(true)
                         Text(machine.label).font(.system(size: 14)).lineLimit(1)
                         Spacer(minLength: 0)
                         if attention > 0 { Text("\(attention)").font(.system(size: 11, weight: .semibold)).foregroundStyle(OrbTheme.warning) }
-                        Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(OrbTheme.secondary).rotationEffect(.degrees(expanded ? 90 : 0))
                     }.frame(height: 35).contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityLabel(machine.label)
                     .accessibilityValue("\(online ? "Online" : "Unavailable"), \(expanded ? "Expanded" : "Collapsed")")
                     .help(expanded ? "Collapse sessions" : "Expand sessions")
-                Button { settingsMachine = machine } label: { Image(systemName: "gearshape").font(.system(size: 17)).foregroundStyle(OrbTheme.secondary).frame(width: 27, height: 32) }
-                    .buttonStyle(.plain).help("Settings for \(machine.label)").accessibilityLabel("Settings for \(machine.label)")
+                Button { settingsMachine = machine } label: {
+                    Image(systemName: "gearshape").font(.system(size: 12)).foregroundStyle(OrbTheme.secondary).frame(width: 24, height: 30)
+                }.buttonStyle(.plain).focused($focusedDeviceSettings, equals: machine.id)
+                    .opacity(hoveredMachine == machine.id || focusedDeviceSettings == machine.id ? 1 : 0)
+                    .help("Settings for \(machine.label)").accessibilityLabel("Settings for \(machine.label)")
+                Button {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { expansionOverrides[machine.id] = !expanded }
+                } label: {
+                    Image(systemName: "chevron.right").font(.system(size: 10)).foregroundStyle(OrbTheme.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0)).frame(width: 18, height: 30)
+                }.buttonStyle(.plain).accessibilityLabel(expanded ? "Collapse \(machine.label)" : "Expand \(machine.label)")
             }.padding(.horizontal, 3)
                 .background((sessions.isEmpty && selected && !isSettings && !isCreating) ? OrbTheme.selection : hoveredMachine == machine.id ? OrbTheme.raised.opacity(0.65) : .clear, in: RoundedRectangle(cornerRadius: 8))
                 .onHover { hoveredMachine = $0 ? machine.id : nil }
             if expanded {
                 ForEach(sessions) { agent in
                     Button { showingGeneralSettings = false; creating = false; Task { await model.choose(agent) } } label: {
-                        HStack(spacing: 13) {
-                            Image(systemName: "bubble.left").font(.system(size: 19, weight: .light))
-                                .overlay(alignment: .bottomTrailing) {
-                                    Circle().fill(agent.agent_status == "working" ? OrbTheme.online : agent.agent_status == "blocked" ? OrbTheme.warning : Color(hex: 0xE8CB60))
-                                        .frame(width: 7, height: 7).overlay(Circle().stroke(OrbTheme.sidebar, lineWidth: 1)).offset(x: 3, y: 2)
-                                }
+                        HStack(spacing: 10) {
+                            Circle().fill(agent.agent_status == "working" ? OrbTheme.online : agent.agent_status == "blocked" ? OrbTheme.warning : OrbTheme.online.opacity(0.8))
+                                .frame(width: 6, height: 6).accessibilityHidden(true)
+                            ProviderLogo(provider: agent.agent).frame(width: 16, height: 16)
                             Text(model.sessionLabel(agent)).font(.system(size: 14)).lineLimit(1)
                             Spacer(minLength: 0)
                             if agent.agent_status == "blocked" || model.state(agent).unread { Image(systemName: "exclamationmark.circle").font(.system(size: 11)).foregroundStyle(OrbTheme.warning) }
                         }.foregroundStyle(model.selected?.id == agent.id && !isSettings && !isCreating ? OrbTheme.text : OrbTheme.secondary)
-                            .padding(.horizontal, 16).frame(height: 38)
+                            .padding(.horizontal, 9).frame(height: 34)
                             .background(model.selected?.id == agent.id && !isSettings && !isCreating ? OrbTheme.selection : hoveredSession == agent.id ? OrbTheme.raised : .clear, in: RoundedRectangle(cornerRadius: 9))
                             .contentShape(RoundedRectangle(cornerRadius: 9))
                     }.buttonStyle(.plain)
-                        .accessibilityLabel("\(model.sessionLabel(agent)), \(statusLabel(agent.agent_status))")
+                        .accessibilityLabel("\(model.sessionLabel(agent)), \(agent.kind), \(statusLabel(agent.agent_status))")
                         .accessibilityAddTraits(model.selected?.id == agent.id ? .isSelected : [])
                         .help("\(agent.workspaceLabel ?? "Workspace") · \(agent.kind) · \(agent.cwd ?? "")")
                         .contextMenu {
@@ -277,38 +281,25 @@ struct PanelView: View {
         }
     }
     var header: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(isCreating ? "New session" : machineName).font(OrbTheme.titleFont)
-                HStack(spacing: 13) {
-                    Text(isCreating ? "Choose where your agent will work" : model.selected.map { "\($0.kind) / \(model.sessionLabel($0))" } ?? (model.activeSessions.contains { $0.machineID == displayedMachineID } ? "Choose a session to start talking" : "No active sessions"))
-                        .font(.system(size: 13)).foregroundStyle(OrbTheme.secondary).lineLimit(1)
-                    if !isCreating && !model.showingSetup {
-                        OrbStatus(text: (model.connection[displayedMachineID] ?? .connecting).rawValue, color: model.connection[displayedMachineID] == .online ? OrbTheme.online : OrbTheme.warning)
-                    }
+        HStack(spacing: 16) {
+            Text(isCreating ? "New session" : machineName).font(.system(size: 18, weight: .semibold)).lineLimit(1)
+            if let agent = model.selected, !isCreating && !model.showingSetup {
+                HStack(spacing: 6) {
+                    ProviderLogo(provider: agent.agent).frame(width: 14, height: 14)
+                    Text(agent.kind).font(.system(size: 12)).foregroundStyle(OrbTheme.secondary)
                 }
             }
+            if !isCreating && !model.showingSetup {
+                OrbStatus(text: (model.connection[displayedMachineID] ?? .connecting).rawValue,
+                    color: model.connection[displayedMachineID] == .online ? OrbTheme.online : OrbTheme.warning)
+            }
             Spacer(minLength: 0)
-            Button { moveSession(-1) } label: { Image(systemName: "chevron.left").font(.system(size: 18)).frame(width: 26, height: 32) }
-                .keyboardShortcut(.upArrow, modifiers: [.command, .option]).buttonStyle(.plain).help("Previous session").accessibilityLabel("Previous session")
-            Button { moveSession(1) } label: { Image(systemName: "chevron.right").font(.system(size: 18)).frame(width: 26, height: 32) }
-                .keyboardShortcut(.downArrow, modifiers: [.command, .option]).buttonStyle(.plain).help("Next session").accessibilityLabel("Next session")
-            Rectangle().fill(OrbTheme.line).frame(width: 1, height: 24).padding(.horizontal, 8)
-            Button(action: close) { Image(systemName: "xmark").font(.system(size: 19, weight: .light)).frame(width: 26, height: 32) }
-                .buttonStyle(.plain).help("Close pop-out").accessibilityLabel("Close pop-out")
-        }.padding(.horizontal, OrbTheme.inset).frame(height: OrbTheme.headerHeight)
+        }.padding(.horizontal, 18).frame(height: 52)
     }
     func conversation(_ agent: Agent) -> some View {
         SessionConversation(model: model, agent: agent, machine: model.machines.first { $0.id == agent.machineID } ?? .local, session: model.state(agent)).id(agent.id)
     }
-    private func moveSession(_ direction: Int) {
-        let sessions = model.activeSessions
-        guard !sessions.isEmpty else { return }
-        let index = sessions.firstIndex(where: { $0.id == model.selected?.id }) ?? (direction > 0 ? -1 : 0)
-        let next = (index + direction + sessions.count) % sessions.count
-        creating = false
-        Task { await model.choose(sessions[next]) }
-    }
+
     var emptyState: some View {
         VStack(spacing: 15) {
             Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 46, weight: .ultraLight)).foregroundStyle(OrbTheme.secondary).padding(.bottom, 5)

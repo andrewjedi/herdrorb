@@ -5,6 +5,7 @@ import SwiftTerm
 /// Isolated, deterministic UI fixtures. These never attach to a terminal, discover
 /// machine profiles, or read project folders. They use the same production views.
 enum DesignPreviewScreen: String, CaseIterable {
+    case imageConversation = "18-image-conversation"
     case conversation = "01-conversation"
     case terminal = "02-terminal"
     case newSession = "03-new-session"
@@ -20,6 +21,8 @@ enum DesignPreviewScreen: String, CaseIterable {
     case orb = "13-orb-and-preview"
     case thinking = "14-conversation-thinking"
     case approval = "15-conversation-approval"
+    case composer = "16-composer-controls"
+    case claudeComposer = "17-claude-composer"
     static var requested: Self? {
         guard AppPreferences.isDemo, let index = CommandLine.arguments.firstIndex(of: "--screen"), CommandLine.arguments.indices.contains(index + 1) else { return nil }
         return Self(rawValue: CommandLine.arguments[index + 1])
@@ -51,6 +54,10 @@ struct DemoTerminal: NSViewRepresentable {
         return file
     }
     static func showArtifactFixtureIfRequested() {
+        if AppPreferences.isDemo, CommandLine.arguments.contains("--preview-image-window") {
+            ArtifactPreview.shared.show(imageFixtureURL, source: "This Mac")
+            return
+        }
         guard AppPreferences.isDemo, CommandLine.arguments.contains("--preview-artifact") else { return }
         do { ArtifactPreview.shared.show(try artifactFixtureURL(), source: "This Mac") }
         catch { fputs("Artifact fixture failed: \(error)\n", stderr) }
@@ -92,8 +99,10 @@ struct DemoTerminal: NSViewRepresentable {
             state.messages = TerminalPresentation.messages(output, kind: "codex")
             state.messageRevision = 1
             state.cached = false
+            state.contextUsage = ContextUsage.footer(in: agent.agent == "codex" ? "›\n72% context left" : "❯\nContext: 63% used", provider: agent.agent)
             state.restored = true
             state.terminalConnected = true
+            state.codexSettings = .preview
         }
         model.selected = model.agents.first
         model.selectedMachineID = "local"
@@ -103,6 +112,16 @@ struct DemoTerminal: NSViewRepresentable {
         model.preferences.set(false, forKey: "orbHoverSound")
         model.preferences.set(OrbStyle.nebula.rawValue, forKey: "orbStyle")
         switch screen {
+        case .imageConversation:
+            let file = imageFixtureURL
+            let prompt = ConversationImageInstructions.prompt("Generate an illustration of a planet in space.", kind: "codex")
+            let output = "› \(prompt)\n• Generating your image.\n• Called image_gen.imagegen\n─ Worked for 18s ───\n• Here’s your image.\n\n![Planet in space](<\(file.path)>)"
+            model.agents[0].tabLabel = "Image generation"
+            model.selected = model.agents[0]
+            model.current.output = output
+            model.current.history = output
+            model.current.messages = TerminalPresentation.messages(output, kind: "codex")
+            model.current.messageRevision += 1
         case .setup:
             model.machines = [.local]; model.selected = nil; model.agents = []
             model.connection = ["local": .missing]
@@ -115,6 +134,12 @@ struct DemoTerminal: NSViewRepresentable {
         default: break
         }
     }
+    static var imageFixtureURL: URL {
+        if AppPreferences.isDemo, let index = CommandLine.arguments.firstIndex(of: "--preview-image"), CommandLine.arguments.indices.contains(index + 1) {
+            return URL(fileURLWithPath: CommandLine.arguments[index + 1])
+        }
+        return Bundle.module.url(forResource: "ObservatoryBackground", withExtension: "png")!
+    }
     static func view(_ screen: DesignPreviewScreen, model: BubbleModel) -> (AnyView, NSSize, Bool) {
         let placement = PopoverPlacement(); placement.showPointer = false
         let local = model.machines.first ?? .local
@@ -124,6 +149,8 @@ struct DemoTerminal: NSViewRepresentable {
         case .projects: return (AnyView(DeviceProjectSettings(model: model, machine: local)), NSSize(width: 610, height: 360), false)
         case .folders: return (AnyView(FolderBrowser(machine: local, initialPath: "~/Projects", demo: true, select: { _ in })), NSSize(width: 650, height: 538), false)
         case .dialogs: return (AnyView(PreviewStateBoard()), NSSize(width: 1012, height: 790), false)
+        case .claudeComposer: return (AnyView(ComposerControlsPreviewBoard(provider: "claude")), NSSize(width: 820, height: 1300), false)
+        case .composer: return (AnyView(ComposerControlsPreviewBoard()), NSSize(width: 820, height: 1100), false)
         case .orb: return (AnyView(PreviewOrbAndArtifact(model: model)), NSSize(width: 900, height: 613), false)
         default: return (AnyView(PanelView(model: model, placement: placement, close: {}, resize: { _ in }, preview: screen)), panelSize, true)
         }

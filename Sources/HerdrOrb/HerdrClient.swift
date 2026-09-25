@@ -91,8 +91,16 @@ struct PendingMessage: Identifiable, Equatable {
 }
 @MainActor final class SessionState: ObservableObject {
     let identity: String
-    @Published var output = ""
-    @Published var history = ""
+    // Raw terminal spinners/footer changes are not conversation view updates.
+    var output = "" {
+        didSet {
+            let next = TerminalPresentation.activityNotice(output, status: "working")
+            if activityMessage != next { activityMessage = next }
+        }
+    }
+    var history = ""
+    @Published var contextUsage: ContextUsage?
+    @Published var activityMessage: String?
     @Published var messages: [SessionMessage] = []
     var messageRevision = 0
     var lastCleanOutput: String?
@@ -108,6 +116,11 @@ struct PendingMessage: Identifiable, Equatable {
     @Published var unread = false
     @Published var terminal = false
     @Published var commandMode = false
+    @Published var codexSettings = CodexSessionSettings()
+    @Published var claudeSettings = SessionComposerSettings()
+    var claudeSettingsLoadAttempted = false
+    @Published var settingsBusy = false
+    var settingsLoadAttempted = false
     @Published var terminalConnected = false
     var terminalSeed: String?
     var terminalSeedFromDraft = false
@@ -139,7 +152,7 @@ struct PendingMessage: Identifiable, Equatable {
     @Published var refreshing = false
     @Published var launching = false
     @Published var globalNotice: String?
-    @Published var lastUpdated: Date?
+    var lastUpdated: Date?
     @Published var panelVisible = false
     private var states: [String: SessionState] = [:]
     private var observers: [String: [AnyCancellable]] = [:]
@@ -355,6 +368,7 @@ struct PendingMessage: Identifiable, Equatable {
     func resumeLive() {
         liveTask?.cancel()
         guard panelVisible, let agent = selected, !state(agent).terminal else { liveTask = nil; return }
+        state(agent).contextUsage = nil
         liveTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, self.transports[agent.machineID] != nil else {
@@ -377,6 +391,7 @@ struct PendingMessage: Identifiable, Equatable {
         connection[agent.machineID] == .online && agents.contains { $0.id == agent.id && $0.profileIdentity == agent.profileIdentity }
     }
     func needsTerminalResponse(_ agent: Agent) -> Bool {
+        if state(agent).settingsBusy { return false }
         let current = agents.first { $0.id == agent.id && $0.profileIdentity == agent.profileIdentity } ?? agent
         return current.agent_status == "blocked"
     }
@@ -392,26 +407,44 @@ struct PendingMessage: Identifiable, Equatable {
     func readSelected() async {
         guard let agent = selected, canInteract(agent), let transport = transports[agent.machineID] else { return }
         let state = state(agent)
-        guard !state.reading && !state.liveReadInFlight else { return }
+        guard !state.reading && !state.liveReadInFlight && !state.settingsBusy else { return }
         state.liveReadInFlight = true
         if state.output.isEmpty { state.reading = true }
         defer { state.liveReadInFlight = false; if state.reading { state.reading = false } }
         do {
             let result = try await transport.call("pane.read", ["pane_id": agent.pane_id, "source": "visible", "format": "text", "strip_ansi": true])
             try Task.checkCancellation()
+            guard !state.settingsBusy else { return }
             guard let read = result["read"] as? [String: Any], let text = read["text"] as? String else { return }
+            let usage = ContextUsage.footer(in: text, provider: agent.agent)
+            if state.contextUsage != usage { state.contextUsage = usage }
             state.revision = read["revision"] as? Int
             if state.cached { state.notice = nil; state.cached = false }
             if state.output != text {
+                let history = state.history, lastClean = state.lastCleanOutput, previous = state.messages
+                state.parseVersion += 1
+                let version = state.parseVersion
+                let update = await Task.detached(priority: .userInitiated) {
+                    let clean = TerminalPresentation.conversation(text, kind: agent.agent)
+                    guard clean != lastClean else { return (clean, history, previous) }
+                    let merged = String(TerminalPresentation.mergeHistory(history, live: clean).suffix(250_000))
+                    return (clean, merged, TerminalPresentation.messages(merged, kind: agent.agent, previous: previous))
+                }.value
+                try Task.checkCancellation()
+                guard state.parseVersion == version, !state.settingsBusy else { return }
                 state.output = text
-                let clean = TerminalPresentation.conversation(text, kind: agent.agent)
-                if state.lastCleanOutput != clean {
-                    state.lastCleanOutput = clean
-                    state.history = String(TerminalPresentation.mergeHistory(state.history, live: clean).suffix(250_000))
-                    await parse(agent, state: state)
+                state.lastCleanOutput = update.0
+                state.history = update.1
+                let changed = state.messages != update.2
+                if changed {
+                    updateConversationAnchor(state, messages: update.2)
+                    state.messageRevision += 1
+                    state.messages = update.2
                 }
-                state.pending.removeAll { text.contains($0.text) }
-                persist(agent)
+                let pending = state.pending.filter { !text.contains($0.text) }
+                let delivered = state.pending != pending
+                if delivered { state.pending = pending }
+                if changed || delivered { persist(agent) }
             }
         } catch {
             if !Task.isCancelled { state.notice = error.localizedDescription; state.cached = true }
@@ -422,16 +455,25 @@ struct PendingMessage: Identifiable, Equatable {
         let version = state.parseVersion
         let output = state.history.isEmpty ? state.output : state.history
         let kind = agent.agent
-        let messages = await Task.detached(priority: .userInitiated) { TerminalPresentation.messages(output, kind: kind) }.value
+        let previous = state.messages
+        let messages = await Task.detached(priority: .userInitiated) { TerminalPresentation.messages(output, kind: kind, previous: previous) }.value
         if version == state.parseVersion && state.messages != messages {
+            updateConversationAnchor(state, messages: messages)
             state.messageRevision += 1
             state.messages = messages
+        }
+    }
+    private func updateConversationAnchor(_ state: SessionState, messages: [SessionMessage]) {
+        let automatic = preferences.object(forKey: "automaticallyScrollToNewMessages") as? Bool ?? true
+        if (state.follow && automatic) || state.scrollAnchor == nil {
+            let next = ConversationWindow.latestAnchor(in: messages)
+            if state.scrollAnchor != next { state.scrollAnchor = next }
         }
     }
     func loadHistory() async {
         guard let agent = selected, canInteract(agent), let transport = transports[agent.machineID] else { return }
         let state = state(agent)
-        guard !state.reading else { return }
+        guard !state.reading, !state.settingsBusy else { return }
         liveTask?.cancel(); state.reading = true
         defer { state.reading = false; resumeLive() }
         do {
@@ -439,6 +481,102 @@ struct PendingMessage: Identifiable, Equatable {
             guard let read = result["read"] as? [String: Any], let text = read["text"] as? String else { return }
             state.history = TerminalPresentation.conversation(text, kind: agent.agent); await parse(agent, state: state); persist(agent)
         } catch { state.notice = error.localizedDescription }
+    }
+    func canChangeAgentSettings(_ agent: Agent) -> Bool {
+        let current = agents.first { $0.id == agent.id && $0.profileIdentity == agent.profileIdentity } ?? agent
+        let session = state(agent)
+        return ["codex", "claude"].contains(agent.agent) && canInteract(agent) && !session.terminal && !session.busy
+            && !["working", "blocked"].contains(current.agent_status)
+    }
+    func refreshAgentSettings(_ agent: Agent) async {
+        if agent.agent == "codex" { await refreshCodexSettings(agent); return }
+        let session = state(agent)
+        guard agent.agent == "claude", canChangeAgentSettings(agent), !session.settingsBusy else { return }
+        session.claudeSettingsLoadAttempted = true
+        guard let transport = transports[agent.machineID], !isDemo else { return }
+        session.settingsBusy = true
+        defer { session.settingsBusy = false }
+        do { session.claudeSettings = try await ClaudeSettingsBridge(connection: transport, paneID: agent.pane_id).refresh() }
+        catch is CancellationError { session.claudeSettingsLoadAttempted = false }
+        catch { session.notice = "Couldn't read Claude settings. \(error.localizedDescription)" }
+    }
+    func updateAgentSetting(_ agent: Agent, key: String, value: String) async {
+        if agent.agent == "codex" { await updateCodexSetting(agent, key: key, value: value); return }
+        let session = state(agent)
+        guard agent.agent == "claude", canChangeAgentSettings(agent), !session.settingsBusy,
+              let transport = transports[agent.machineID], !isDemo else { return }
+        session.settingsBusy = true
+        defer { session.settingsBusy = false }
+        do {
+            session.claudeSettings = try await ClaudeSettingsBridge(connection: transport, paneID: agent.pane_id)
+                .update(key: key, value: value, current: session.claudeSettings)
+            session.notice = nil
+        } catch {
+            session.claudeSettings = SessionComposerSettings()
+            session.notice = "Couldn't confirm the Claude setting. \(error.localizedDescription)"
+        }
+    }
+    func canChangeCodexSettings(_ agent: Agent) -> Bool {
+        let current = agents.first { $0.id == agent.id && $0.profileIdentity == agent.profileIdentity } ?? agent
+        let session = state(agent)
+        return agent.agent == "codex" && canInteract(agent) && !session.terminal && !session.busy
+            && !["working", "blocked"].contains(current.agent_status)
+    }
+    func refreshCodexSettings(_ agent: Agent) async {
+        let session = state(agent)
+        guard canChangeCodexSettings(agent), !session.settingsBusy else { return }
+        session.settingsLoadAttempted = true
+        if isDemo {
+            session.codexSettings = .preview
+            return
+        }
+        guard let transport = transports[agent.machineID] else { return }
+        session.settingsBusy = true
+        defer { session.settingsBusy = false }
+        do {
+            session.codexSettings = try await CodexSettingsBridge(connection: transport, paneID: agent.pane_id).refresh()
+        } catch is CancellationError {
+            session.settingsLoadAttempted = false
+            // The composer may disappear while switching sessions.
+        } catch {
+            session.notice = "Couldn't read Codex settings. \(error.localizedDescription)"
+        }
+    }
+    func updateCodexSetting(_ agent: Agent, key: String, value: String) async {
+        let session = state(agent)
+        guard canChangeCodexSettings(agent), !session.settingsBusy else {
+            session.notice = "Wait for Codex to finish before changing its settings."
+            return
+        }
+        session.settingsBusy = true
+        defer { session.settingsBusy = false }
+        if isDemo {
+            switch key {
+            case "access": session.codexSettings.access = value
+            case "model": session.codexSettings.model = value
+            case "effort": session.codexSettings.effort = value
+            case "speed": session.codexSettings.speed = value
+            default: break
+            }
+            return
+        }
+        guard let transport = transports[agent.machineID] else { return }
+        do {
+            session.codexSettings = try await CodexSettingsBridge(connection: transport, paneID: agent.pane_id)
+                .update(key: key, value: value, current: session.codexSettings)
+            session.notice = nil
+        } catch {
+            // The CLI may have applied a choice before a connection failed. Do not
+            // keep presenting the previously confirmed value as the current one.
+            switch key {
+            case "access": session.codexSettings.access = nil
+            case "model": session.codexSettings.model = nil; session.codexSettings.effort = nil
+            case "effort": session.codexSettings.effort = nil
+            case "speed": session.codexSettings.speed = nil
+            default: break
+            }
+            session.notice = "Couldn't confirm the setting. \(error.localizedDescription)"
+        }
     }
     static func isSlashCommand(_ text: String) -> Bool {
         text.hasPrefix("/") && !text.contains("\n") && !text.contains("\r")
@@ -451,7 +589,7 @@ struct PendingMessage: Identifiable, Equatable {
     }
     func openSlashCommands(_ agent: Agent, text: String = "/", fromDraft: Bool = false, submit: Bool = false) {
         let state = state(agent)
-        guard !state.terminal, !state.busy else { return }
+        guard !state.terminal, !state.busy, !state.settingsBusy else { return }
         guard canInteract(agent), !agent.isShell else {
             state.notice = "Reconnect to this agent before opening its command menu."; return
         }
@@ -477,6 +615,8 @@ struct PendingMessage: Identifiable, Equatable {
     }
     func closeTerminal(_ agent: Agent) {
         let state = state(agent)
+        state.settingsLoadAttempted = false
+        state.claudeSettingsLoadAttempted = false
         state.terminal = false; state.commandMode = false; state.terminalConnected = false
         state.terminalSeed = nil; state.terminalSeedFromDraft = false
         resumeLive()
@@ -497,14 +637,15 @@ struct PendingMessage: Identifiable, Equatable {
             openSlashCommands(agent, text: text, fromDraft: true, submit: true)
             return
         }
-        guard !state.busy, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !state.busy, !state.settingsBusy, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let pending = PendingMessage(text: text)
         state.pending.append(pending); state.draft = ""; state.busy = true; state.notice = nil; persist(agent)
         defer { state.busy = false }
         do {
-            _ = try await transport.call("agent.prompt", ["target": agent.pane_id, "text": text], timeout: 20)
+            let prompt = ConversationImageInstructions.prompt(text, kind: agent.agent)
+            _ = try await transport.call("agent.prompt", ["target": agent.pane_id, "text": prompt], timeout: 20)
             if let index = state.pending.firstIndex(where: { $0.id == pending.id }) {
-                state.pending[index].state = agent.agent_status == "working" ? "Delivered · Codex may queue this follow-up" : "Delivered to Codex"
+                state.pending[index].state = agent.agent_status == "working" ? "Delivered · \(agent.kind) may queue this follow-up" : "Delivered to \(agent.kind)"
             }
         } catch {
             if let index = state.pending.firstIndex(where: { $0.id == pending.id }) { state.pending[index].state = "Not confirmed" }

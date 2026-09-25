@@ -40,6 +40,8 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSMicrophoneUsageDescription</key><string>Use your microphone to dictate a message. Dictation starts only when you click the microphone.</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>Turn your speech into an editable message. Recognition happens on this Mac when available; otherwise Apple processes the audio.</string>
 <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Andrew Thompson. MIT licensed. Independent of Herdr.</string>
 </dict></plist>
 PLIST
@@ -47,8 +49,15 @@ if [ "$SIGNING_IDENTITY" = '-' ]; then
   codesign --force --sign - "$BUNDLE"
 else
   case "$SIGNING_IDENTITY" in 'Developer ID Application:'*) ;; *) echo 'Distribution signing requires a Developer ID Application identity' >&2; exit 1;; esac
-  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$BUNDLE/Contents/MacOS/HerdrOrb"
-  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$BUNDLE"
+  cat > "$STAGING/HerdrOrb.entitlements" <<'ENTITLEMENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.device.audio-input</key><true/>
+</dict></plist>
+ENTITLEMENTS
+  codesign --force --options runtime --timestamp --entitlements "$STAGING/HerdrOrb.entitlements" --sign "$SIGNING_IDENTITY" "$BUNDLE/Contents/MacOS/HerdrOrb"
+  codesign --force --options runtime --timestamp --entitlements "$STAGING/HerdrOrb.entitlements" --sign "$SIGNING_IDENTITY" "$BUNDLE"
 fi
 codesign --verify --deep --strict "$BUNDLE"
 mkdir -p dist

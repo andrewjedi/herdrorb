@@ -20,7 +20,7 @@ enum OrbTheme {
     static let online = Color(hex: 0x63CE77)
     static let warning = Color(hex: 0xF1C44D)
     static let danger = Color(hex: 0xEF6A76)
-    static let sidebarWidth: CGFloat = 254
+    static let sidebarWidth: CGFloat = 234
     static let panelWidth: CGFloat = 928 // includes the pointer's 14pt reserve on each side
     static let panelHeight: CGFloat = 613
     static let headerHeight: CGFloat = 70
@@ -127,10 +127,10 @@ struct OrbSegment: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 9) {
-                if let symbol { Image(systemName: symbol).font(.system(size: compact ? 16 : 18)) }
-                Text(title).font(.system(size: compact ? 13 : 14, weight: selected ? .medium : .regular))
+                if let symbol { Image(systemName: symbol).font(.system(size: compact ? 12 : 18)) }
+                Text(title).font(.system(size: compact ? 12 : 14, weight: selected ? .medium : .regular))
             }.foregroundStyle(OrbTheme.text).padding(.horizontal, compact ? 10 : 16)
-                .frame(maxWidth: fillsWidth ? .infinity : nil).frame(height: 32)
+                .frame(maxWidth: fillsWidth ? .infinity : nil).frame(height: compact ? 26 : 32)
                 .background(selected ? OrbTheme.selection : .clear, in: RoundedRectangle(cornerRadius: 7))
                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected ? OrbTheme.selectionEdge : .clear, lineWidth: 0.8))
                 .contentShape(RoundedRectangle(cornerRadius: 7))
@@ -224,5 +224,29 @@ struct OrbSwitchStyle: ToggleStyle {
         }.buttonStyle(.plain)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: configuration.isOn)
             .accessibilityRepresentation { Toggle(isOn: configuration.$isOn) { configuration.label }.toggleStyle(.switch) }
+    }
+}
+
+
+struct ProviderLogo: View {
+    let provider: String?
+    private static let codex = load("ProviderCodex")
+    private static let claude = load("ProviderClaude")
+    private static func load(_ name: String) -> NSImage? {
+        let packaged = Bundle.main.resourceURL.flatMap { Bundle(url: $0.appendingPathComponent("HerdrOrb_HerdrOrb.bundle")) }
+        #if SWIFT_PACKAGE
+        let resources = packaged ?? Bundle.module
+        #else
+        let resources = packaged ?? Bundle.main
+        #endif
+        guard let url = resources.url(forResource: name, withExtension: "svg") else { return nil }
+        return NSImage(contentsOf: url)
+    }
+    var body: some View {
+        Group {
+            if let icon = provider == "codex" ? Self.codex : provider == "claude" ? Self.claude : nil {
+                Image(nsImage: icon).resizable().scaledToFit()
+            } else { Image(systemName: "terminal").resizable().scaledToFit() }
+        }.accessibilityHidden(true)
     }
 }

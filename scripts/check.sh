@@ -3,7 +3,7 @@ set -eu
 cd "$(dirname "$0")/.."
 CHECK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/herdrorb-checks.XXXXXX")
 trap 'rm -rf "$CHECK_TMP"' EXIT HUP INT TERM
-COMMON="Sources/HerdrOrb/DesignSystem.swift Sources/HerdrOrb/Installation.swift Sources/HerdrOrb/HerdrClient.swift Sources/HerdrOrb/Transport.swift Sources/HerdrOrb/ConversationCache.swift Sources/HerdrOrb/SessionNames.swift Sources/HerdrOrb/TerminalPresentation.swift"
+COMMON="Sources/HerdrOrb/ContextUsage.swift Sources/HerdrOrb/DesignSystem.swift Sources/HerdrOrb/Installation.swift Sources/HerdrOrb/HerdrClient.swift Sources/HerdrOrb/Transport.swift Sources/HerdrOrb/ConversationCache.swift Sources/HerdrOrb/SessionNames.swift Sources/HerdrOrb/TerminalPresentation.swift Sources/HerdrOrb/CodexSessionSettings.swift Sources/HerdrOrb/ClaudeSessionSettings.swift"
 swiftc -parse-as-library $COMMON Sources/HerdrOrb/MessageComposer.swift Tests/ConversationChecks.swift -o "$CHECK_TMP/herdr-conversation-checks"
 "$CHECK_TMP/herdr-conversation-checks"
 cat Sources/HerdrOrb/TerminalPresentation.swift Tests/PresentationChecks.swift > "$CHECK_TMP/herdr-presentation-checks.swift"

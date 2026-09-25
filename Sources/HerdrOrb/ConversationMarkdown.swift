@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-struct ConversationMarkdown: View {
+struct ConversationMarkdown: View, Equatable {
     let text: String
     var documentStyle = false
     private func inline(_ text: String) -> Text {
@@ -18,10 +18,7 @@ struct ConversationMarkdown: View {
         }
         return Text(attributed)
     }
-    private var blocks: [ConversationBlock] {
-        ConversationBlock.parse(text).filter { !$0.text.isEmpty }
-    }
-    private func gap(before index: Int) -> CGFloat {
+    private func gap(before index: Int, blocks: [ConversationBlock]) -> CGFloat {
         guard index > 0 else { return 0 }
         let previous = blocks[index - 1].kind, current = blocks[index].kind
         if case .item = previous, case .item = current { return documentStyle ? 12 : 7 }
@@ -31,9 +28,11 @@ struct ConversationMarkdown: View {
         return 12
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        // Parse once per changed message, not twice for every block's spacing.
+        let blocks = ConversationBlock.parse(text).filter { !$0.text.isEmpty }
+        return VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                blockView(block, index: index).padding(.top, gap(before: index))
+                blockView(block, index: index).padding(.top, gap(before: index, blocks: blocks))
                 if documentStyle, index == 0, case .heading = block.kind {
                     OrbRule().padding(.top, 18).padding(.bottom, 8)
                 }

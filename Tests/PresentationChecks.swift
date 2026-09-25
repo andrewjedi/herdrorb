@@ -134,3 +134,50 @@ let approvalFirst = TerminalPresentation.messages("› Do it.\n✔ You approved 
 assert(approvalFirst[0].text == "Do it." && approvalFirst.count == 2)
 assert(TerminalPresentation.response(approvalFirst[1], kind: "codex", working: false).answer == "Done.")
 print("Approval-first responses stay out of user messages")
+
+let screenshotHistory = """
+› Merge latest dev.
+• Running yarn install
+  └ Linking dependencies
+› Ask Codex to do anything
+GPT-6-Astra low fast · ~/Documents/PROJECTS/AP-NEW · Check dev against origin    ⚠ 1 warning · f2 to view
+
+— Live terminal view —
+
+core/supabase/migrations/example.sql:111: new blank line at EOF.
+  +6 lines (ctrl+t to view transcript)
+Working (2m 28s • esc to interrupt)
+─ Worked for 2m 32s ───
+• Merged latest origin/dev and pushed.
+
+Resolved four conflicts. All checks pass.
+› Ask Codex to do anything
+GPT-6-Astra low fast · ~/Documents/PROJECTS/AP-NEW · Check dev against origin    ⚠ 1 warning · f2 to view
+"""
+let screenshotMessages = TerminalPresentation.messages(screenshotHistory, kind: "codex")
+assert(screenshotMessages.filter(\.fromUser).map(\.text) == ["Merge latest dev."])
+assert(!screenshotMessages.contains { $0.text.contains("GPT-6-Astra") || $0.text.contains("Ask Codex") })
+let screenshotResponses = screenshotMessages.filter { !$0.fromUser }.map { TerminalPresentation.response($0, kind: "codex", working: false) }
+assert(screenshotResponses.last?.answer == "Merged latest origin/dev and pushed.\n\nResolved four conflicts. All checks pass.")
+assert(screenshotResponses.last?.activity.contains("new blank line at EOF") == true)
+assert(!screenshotResponses.contains { $0.answer.contains("ctrl+t") || $0.answer.contains("esc to interrupt") || $0.answer.contains("Live terminal view") })
+let quotedChrome = "› Explain this\n• Example:\n```\n› Ask Codex to do anything\nGPT-6-Astra low fast · ~/Project\n— Live terminal view —\n```"
+assert(TerminalPresentation.messages(quotedChrome, kind: "codex").last?.text.contains("GPT-6-Astra") == true)
+print("Screenshot regression: cached composers, model footers, terminal fragments and transient status stay out of chat; fenced examples survive")
+
+let settingsCard = """
+/status
+╭──────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.155.1)                │
+│ Model: gpt-6-astra (reasoning low)        │
+│ Permissions: Full Access                 │
+│ Account: example                        │
+╰──────────────────────────────────────────╯
+"""
+let settingsHistory = "› Hello\n• A clear reply.\n\n" + settingsCard + "\n› Ask Codex to do anything\n  GPT-6-Astra low fast · ~/project"
+let withoutSettings = TerminalPresentation.messages(settingsHistory, kind: "codex")
+assert(withoutSettings.map(\.text) == ["Hello", "• A clear reply."])
+let quotedSettings = TerminalPresentation.messages("› Explain this\n• Example:\n```\n" + settingsCard + "\n```", kind: "codex")
+assert(quotedSettings.last?.text.contains("Permissions: Full Access") == true)
+assert(TerminalPresentation.conversation(settingsCard, kind: "claude") == settingsCard)
+print("Codex settings reports stay out of conversation; quoted and non-Codex output remains intact")

@@ -33,6 +33,16 @@ directory. Disable automatic previews if you want to choose every image yourself
 Clearing downloads doesn't close already-open preview windows or undo OS-level
 Quick Look caching.
 
+## Voice dictation
+
+The microphone starts only after clicking the dictation button and granting macOS
+Microphone and Speech Recognition permission. Stop, Cancel, closing the panel,
+or changing conversations releases it. herdrorb does not save audio files.
+Recognition uses Apple's on-device speech model when available for the current
+language; otherwise audio is processed by Apple's speech service. Recognized text
+becomes an editable draft and follows the conversation-saving preference above.
+Nothing is sent to the agent until you send the message.
+
 ## Diagnostics
 
 Settings → Copy diagnostics copies version, OS, architecture, generic connection
