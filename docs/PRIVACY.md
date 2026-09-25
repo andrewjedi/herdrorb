@@ -71,3 +71,18 @@ If you used the prototype, its old preference domain and any unmigrated
 `HerdrBubble` directories may still exist. Remove them separately only if you
 no longer want that data. Do not remove Herdr's configuration or SSH keys as
 part of uninstalling herdrorb.
+
+## Structured conversation history and context
+
+Connected provider sessions are read from the exact Codex or Claude transcript
+identified by Herdr. Complete visible messages and read checkpoints are stored in
+`messages.sqlite` in herdrorb's private Application Support directory, with private
+file permissions and no application-level encryption. Turning conversation saving
+off removes this archive and uses memory; clearing saved data removes the archive.
+The app reads provider files but does not modify or delete them.
+
+Connecting Claude context adds a project-local status-line wrapper, retaining the
+previous command and a backup of the local settings. It stores only session ID,
+model, context counts, and reporting time. Up to 100 telemetry files are retained.
+The integration and backup stay installed when conversation history is cleared.
+Remote transcript reads and telemetry stay on the configured SSH transport.

@@ -73,6 +73,17 @@ actor FakeConnection: HerdrConnection {
         assert(sentPrompt == ConversationImageInstructions.prompt("Keep this draft", kind: "codex"))
         assert(model.state(first).pending.first?.text == "Keep this draft", "Image display instructions must not leak into pending chat bubbles")
         assert(model.draft == "Second draft", "Completing a send must not clear another draft")
+        assert(model.state(first).pending.first?.state.contains("agent receipt not confirmed") == true)
+        await model.choose(first)
+        model.draft = "Hello"
+        await model.send()
+        let followupPrompt = await fast.lastPrompt
+        assert(followupPrompt == "Hello", "Image instructions belong only on the first successful send")
+        let receiptCount = model.current.pending.count
+        await model.readSelected()
+        assert(model.current.pending.count == receiptCount, "Old terminal text containing Hello cannot acknowledge a new send")
+        if let receipt = model.current.pending.last { model.dismissReceipt(receipt.id, agent: first) }
+        assert(model.current.pending.count == receiptCount - 1)
         await model.choose(first)
         await fast.setFailure(true)
         model.draft = "Restore on failure"

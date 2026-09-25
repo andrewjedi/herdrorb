@@ -13,6 +13,10 @@ struct SessionConversation: View {
     @State private var expandedActivity: Set<String> = []
     @State private var prependRevision = 0
     @State private var searchLimit = ConversationWindow.pageSize
+    @State private var searchPage: ConversationArchive.Page?
+    @State private var searchBusy = false
+    @State private var searchError: String?
+    @State private var pageRevision = 0
     @FocusState private var searchFocused: Bool
     var body: some View {
         VStack(spacing: 0) {
@@ -26,7 +30,7 @@ struct SessionConversation: View {
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(OrbTheme.line, lineWidth: 0.8))
                 Spacer(minLength: 0)
                 if !agent.isShell && !session.terminal {
-                    ContextUsageIndicator(provider: agent.kind, usage: session.cached || session.settingsBusy ? nil : session.contextUsage)
+                    ContextUsageIndicator(provider: agent.kind, usage: session.cached || session.settingsBusy ? nil : session.contextUsage, connect: { Task { await model.connectHistory(agent) } })
                 }
                 if session.terminal && !session.terminalConnected {
                     ProgressView().controlSize(.small).help("Connecting terminal…")
@@ -80,14 +84,23 @@ struct SessionConversation: View {
                     if !find.isEmpty { Button { find = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain) }
                 }.font(.system(size: 11)).padding(.horizontal, 24).padding(.bottom, 8)
                 }
+                if let notice = session.transcriptNotice {
+                    HStack(spacing: 8) {
+                        Text(notice).font(.system(size: 11)).foregroundStyle(OrbTheme.secondary)
+                        if !session.structuredHistory && agent.providerSession == nil {
+                            Button("Connect history") { Task { await model.connectHistory(agent) } }
+                                .buttonStyle(.plain).font(.system(size: 11)).disabled(session.settingsBusy)
+                        }
+                    }.padding(.horizontal, 24).padding(.bottom, 8)
+                }
                 if agent.agent_status == "working", let notice = session.activityMessage {
                     Text(notice).font(.system(size: 11)).foregroundStyle(.orange)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.bottom, 8)
                 }
                 ConversationRows(follow: automaticallyScroll && session.follow && find.isEmpty, offset: session.scrollOffset,
-                                   version: ConversationContentVersion(messages: session.messageRevision, pending: session.pending, filter: find, raw: nil, status: agent.agent_status, loading: session.reading, disclosures: expandedActivity, cached: session.cached, historyStart: session.scrollAnchor, prepend: prependRevision, searchLimit: searchLimit), changed: { follow, offset in
+                                   version: ConversationContentVersion(messages: session.messageRevision, pending: session.pending, filter: find, raw: nil, status: agent.agent_status, loading: session.reading, disclosures: expandedActivity, cached: session.cached, historyStart: session.scrollAnchor, prepend: prependRevision, searchLimit: searchLimit + pageRevision), changed: { follow, offset in
                     guard find.isEmpty else { return }
-                    if session.follow != follow { session.follow = follow }
+                    if !session.browsingHistory && session.follow != follow { session.follow = follow }
                     session.scrollOffset = offset
                     model.persist(agent)
                 }, rows: conversationRows)
@@ -111,7 +124,19 @@ struct SessionConversation: View {
                     ConversationComposer(model: model, agent: agent, session: session)
                 }
             }
-        }.onChange(of: find) { _, _ in searchLimit = ConversationWindow.pageSize }
+        }.task(id: find) {
+                searchPage = nil; searchError = nil
+                guard !find.isEmpty else { return }
+                searchBusy = true
+                do {
+                    try await Task.sleep(for: .milliseconds(200))
+                    let page = try await model.searchHistory(agent, query: find)
+                    try Task.checkCancellation()
+                    searchPage = page; pageRevision += 1
+                } catch is CancellationError { return }
+                catch { searchError = error.localizedDescription; pageRevision += 1 }
+                searchBusy = false
+            }
             .onDisappear { model.persist(agent) }
     }
     private func entry(_ id: String, message: SessionMessage? = nil, state: String = "", @ViewBuilder content: @escaping () -> some View) -> ConversationRowEntry {
@@ -124,32 +149,58 @@ struct SessionConversation: View {
     }
     private var conversationRows: [ConversationRowEntry] {
         var result: [ConversationRowEntry] = []
-        if session.output.isEmpty && session.reading { result.append(entry("loading") { OrbSkeleton() }) }
+        if session.messages.isEmpty && session.reading { result.append(entry("loading") { OrbSkeleton() }) }
         if session.cached { result.append(entry("cached") { CachedConversationNotice() }) }
-        let start = ConversationWindow.start(in: session.messages, anchor: session.scrollAnchor)
-        if find.isEmpty && start > 0 {
-            result.append(entry("earlier", state: String(start)) {
-                Button("Show earlier messages (\(start))") {
-                    session.follow = false
-                    session.scrollAnchor = session.messages[max(0, start - ConversationWindow.pageSize)].id
-                    prependRevision += 1
-                    model.persist(agent)
+        if find.isEmpty && session.earlierMessages > 0 {
+            result.append(entry("earlier", state: String(session.earlierMessages) + String(session.loadingHistory)) {
+                Button("Earlier messages (\(session.earlierMessages))") {
+                    expandedActivity.removeAll()
+                    Task { await model.historyPage(agent, earlier: true); pageRevision += 1 }
+                }.buttonStyle(OrbButtonStyle(compact: true)).disabled(session.loadingHistory)
+            })
+        }
+        if find.isEmpty && !session.follow && session.totalMessages > session.messages.count {
+            result.append(entry("latest") {
+                Button("Back to latest") {
+                    expandedActivity.removeAll()
+                    Task { await model.historyPage(agent, earlier: false); pageRevision += 1 }
                 }.buttonStyle(OrbButtonStyle(compact: true))
             })
+        }
+        if !find.isEmpty, let searchError {
+            result.append(entry("searchError", state: searchError) { Text(searchError).font(.caption) })
         }
         for message in visibleMessages {
             let status = message.id == session.messages.last?.id ? agent.agent_status + String(session.pending.isEmpty) : ""
             result.append(entry("message:" + message.id, message: message,
                 state: status + String(expandedActivity.contains(message.id)) + find + (agent.agent ?? "") + (agent.cwd ?? "")) { row(message) })
         }
-        if !find.isEmpty && matchingMessages.count > searchLimit {
-            result.append(entry("moreMatches", state: String(searchLimit)) {
-                Button("Show more matches") { searchLimit += ConversationWindow.pageSize }.buttonStyle(OrbButtonStyle(compact: true))
+        if !find.isEmpty, let page = searchPage, page.hasEarlier && !page.messages.isEmpty {
+            result.append(entry("moreMatches", state: String(pageRevision)) {
+                Button("Earlier matches") {
+                    let query = find, before = page.messages.first?.id
+                    Task {
+                        do {
+                            let next = try await model.searchHistory(agent, query: query, before: before)
+                            guard find == query else { return }
+                            searchPage = next; pageRevision += 1
+                        } catch { searchError = error.localizedDescription; pageRevision += 1 }
+                    }
+                }.buttonStyle(OrbButtonStyle(compact: true))
             })
         }
         for pending in session.pending {
             result.append(entry("pending:" + pending.id.uuidString, state: pending.text + String(describing: pending.state)) {
-                PendingMessageView(text: pending.text, state: pending.state)
+                VStack(alignment: .leading, spacing: 5) {
+                    PendingMessageView(text: String(pending.text.prefix(LongMessagePresentation.limit)), state: pending.state)
+                    if pending.text.count > LongMessagePresentation.limit {
+                        Button("Open complete message") { FullMessageWindow.show(pending.text) }.buttonStyle(.plain).font(.caption)
+                    }
+                    if pending.state != "Sending…" {
+                        Button("Dismiss receipt") { model.dismissReceipt(pending.id, agent: agent) }
+                            .buttonStyle(.plain).font(.caption).foregroundStyle(OrbTheme.secondary)
+                    }
+                }
             })
         }
         if find.isEmpty && agent.agent_status == "working" && (session.messages.last?.fromUser != false || !session.pending.isEmpty || agent.agent != "codex") {
@@ -161,7 +212,7 @@ struct SessionConversation: View {
         session.messages.filter { $0.text.localizedCaseInsensitiveContains(find) }
     }
     private var visibleMessages: [SessionMessage] {
-        if !find.isEmpty { return Array(matchingMessages.prefix(searchLimit)) }
+        if !find.isEmpty { return searchPage?.messages ?? Array(matchingMessages.prefix(40)) }
         let start = ConversationWindow.start(in: session.messages, anchor: session.scrollAnchor)
         return Array(session.messages.dropFirst(start))
     }
@@ -211,10 +262,11 @@ struct ConversationMessageRow: View, Equatable {
             && lhs.working == rhs.working && lhs.blocked == rhs.blocked && lhs.disclosed == rhs.disclosed && lhs.find == rhs.find
     }
     var body: some View {
-        let response = TerminalPresentation.response(message, kind: kind, working: working || blocked)
+        let displayed = LongMessagePresentation.preview(message)
+        let response = TerminalPresentation.response(displayed, kind: kind, working: working || blocked)
         let searchActivity = !find.isEmpty && response.activity.localizedCaseInsensitiveContains(find)
         let expanded = disclosed || searchActivity
-        let codex = !message.fromUser && kind == "codex"
+        let codex = !message.fromUser && kind == "codex" && message.source == nil
         return HStack(alignment: .top, spacing: 0) {
             if message.fromUser { Spacer(minLength: 80) }
             VStack(alignment: .leading, spacing: 12) {
@@ -252,17 +304,22 @@ struct ConversationMessageRow: View, Equatable {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } else {
-                    ForEach(Array(message.parts.enumerated()), id: \.offset) { partIndex, part in
+                    ForEach(Array(displayed.parts.enumerated()), id: \.offset) { partIndex, part in
                         Group {
                             if message.fromUser || part.status { Text(part.text) }
-                            else { ConversationMarkdown(text: partIndex == 0 && (part.text.hasPrefix("• ") || part.text.hasPrefix("● ")) ? String(part.text.dropFirst(2)) : part.text).equatable() }
+                            else { ConversationMarkdown(text: message.source == nil && partIndex == 0 && (part.text.hasPrefix("• ") || part.text.hasPrefix("● ")) ? String(part.text.dropFirst(2)) : part.text).equatable() }
                         }
                         .font(.system(size: part.status ? 12 : 15)).foregroundStyle(part.status ? OrbTheme.secondary : OrbTheme.text)
                         .lineSpacing(part.status ? 1 : 4).textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                ForEach(codex ? response.artifacts : message.artifacts) { artifact in
+                if displayed.text != message.text {
+                    Button("Open complete message (\(message.text.count.formatted()) characters)") {
+                        FullMessageWindow.show(message.text)
+                    }.buttonStyle(OrbButtonStyle(compact: true))
+                }
+                ForEach(Array((codex ? response.artifacts : message.artifacts).prefix(20))) { artifact in
                     ArtifactCard(artifact: artifact, machine: machine, cwd: cwd)
                 }
             }
@@ -299,6 +356,7 @@ private struct ConversationActivityLabel: View {
 private struct ContextUsageIndicator: View {
     let provider: String
     let usage: ContextUsage?
+    var connect: () -> Void = {}
     @State private var showingDetails = false
     private var tint: Color { (usage?.usedPercent ?? 0) >= 80 ? OrbTheme.warning : OrbTheme.secondary }
     var body: some View {
@@ -324,13 +382,21 @@ private struct ContextUsageIndicator: View {
                 Text("\(provider) context window").font(.headline)
                 if let usage {
                     Text("\(Int(usage.usedPercent.rounded()))% used · \(Int((100 - usage.usedPercent).rounded()))% remaining")
-                    Text("Reported by the CLI footer. This is context capacity, separate from your account usage limits.")
+                    Text("Source: \(usage.source). This is context capacity, separate from account usage limits.")
+                    if usage.source == "Codex session usage" {
+                        Text("The percentage matches Codex’s calculation, which reserves space for instructions and tools.")
+                    }
+                    if let tokens = usage.tokens, let capacity = usage.capacity {
+                        Text("\(tokens.formatted()) tokens · \(capacity.formatted()) token capacity")
+                    }
+                    if let observed = usage.observedAt { Text("Last reported \(observed.formatted(date: .omitted, time: .shortened))") }
                     Text("For a new topic, start a new chat. To continue this task, the CLI can compact earlier messages; usage may decrease after compaction.")
                 } else {
-                    Text("No current context reading is available from this terminal snapshot.")
+                    Text("No current context reading is available for this session.")
                     Text(provider == "Codex"
-                        ? "In Terminal, use /statusline to enable context remaining. The meter updates when that footer is visible beneath the empty prompt."
-                        : "Claude Code needs a status line displaying its context_window.used_percentage, for example: Context: 25% used. Custom formats may not be recognized.")
+                        ? "Connect the provider session to read its saved usage. Existing Codex terminals may need to resume once after the integration is installed."
+                        : "Connect Claude context to read its official usage data. This adds a project-local wrapper that preserves your existing status line.")
+                    Button("Connect history and context", action: connect)
                 }
             }.font(.system(size: 12)).foregroundStyle(OrbTheme.secondary)
                 .fixedSize(horizontal: false, vertical: true).padding(16).frame(width: 300)

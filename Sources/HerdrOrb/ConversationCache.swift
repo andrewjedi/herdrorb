@@ -11,8 +11,11 @@ actor ConversationCache {
         var scrollAnchor: String?
         var history: String = ""
         var scrollOffset: Double?
+        var messages: [SessionMessage]? = nil
+        var imageInstructionsSent: Bool? = nil
     }
     private let directory: URL
+    nonisolated var directoryURL: URL { directory }
     private var enabled = true
     private var loaded: [String: Snapshot] = [:]
     private var pending: [String: Task<Void, Never>] = [:]
@@ -21,7 +24,8 @@ actor ConversationCache {
         self.directory = directory
     }
     nonisolated static func key(for agent: Agent) -> String {
-        let parts = [agent.machineID, agent.profileIdentity ?? "", agent.terminal_id, agent.pane_id]
+        var parts = [agent.machineID, agent.profileIdentity ?? "", agent.terminal_id, agent.pane_id]
+        if let reference = agent.providerSession { parts += [reference.agent, reference.sessionID ?? reference.value] }
         return String(data: try! JSONEncoder().encode(parts), encoding: .utf8)!
     }
     private func file(_ key: String) -> URL {
@@ -48,8 +52,11 @@ actor ConversationCache {
     func store(_ value: Snapshot, for agent: Agent) {
         guard enabled else { return }
         let key = Self.key(for: agent)
-        var value = value; value.text = String(value.text.suffix(250_000)); value.history = String(value.history.suffix(250_000))
-        if let old = loaded[key], old.text == value.text && old.history == value.history && old.draft == value.draft && old.follow == value.follow && old.scrollAnchor == value.scrollAnchor && old.scrollOffset == value.scrollOffset { return }
+        var value = value
+        // Raw output is diagnostic only. Structured messages are never sliced.
+        if value.text.count > 250_000 { value.text = "" }
+        value.history = TerminalPresentation.retainedHistory(value.history, kind: agent.agent)
+        if let old = loaded[key], old.text == value.text && old.history == value.history && old.draft == value.draft && old.follow == value.follow && old.scrollAnchor == value.scrollAnchor && old.scrollOffset == value.scrollOffset && old.messages == value.messages && old.imageInstructionsSent == value.imageInstructionsSent { return }
         loaded[key] = value
         pending[key]?.cancel()
         pending[key] = Task { [weak self] in
@@ -75,7 +82,7 @@ actor ConversationCache {
     private func trimMemory(keeping key: String) {
         let candidates = loaded.keys.filter { $0 != key && pending[$0] == nil }
             .sorted { loaded[$0]!.updatedAt < loaded[$1]!.updatedAt }
-        for expired in candidates.prefix(max(0, loaded.count - 40)) { loaded[expired] = nil }
+        for expired in candidates.prefix(max(0, loaded.count - 4)) { loaded[expired] = nil }
     }
     func flush() { for key in Array(pending.keys) { pending[key]?.cancel(); write(key) } }
     func save(_ text: String, for agent: Agent) { store(Snapshot(text: text, updatedAt: Date()), for: agent) }
@@ -106,6 +113,12 @@ actor ConversationCache {
     func clear() throws {
         for task in pending.values { task.cancel() }
         pending.removeAll(); loaded.removeAll()
-        if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+        // Integration helpers live beside the cache and must survive clearing
+        // chat history; otherwise Claude's chained status line would be broken.
+        for name in ["sessions", "inventory.json", "conversations.json"] {
+            let file = directory.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        }
+        if (try? FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty) == true { try FileManager.default.removeItem(at: directory) }
     }
 }

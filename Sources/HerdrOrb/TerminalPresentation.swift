@@ -130,14 +130,16 @@ enum TerminalPresentation {
     }
 }
 
-struct SessionMessage: Identifiable, Equatable, Sendable {
+struct SessionMessage: Identifiable, Equatable, Sendable, Codable {
     var id: String
     var fromUser: Bool
     var text: String
     var parts: [MessagePart] = []
     var artifacts: [ArtifactReference] = []
+    var phase: String? = nil
+    var source: String? = nil
 }
-struct MessagePart: Equatable, Sendable {
+struct MessagePart: Equatable, Sendable, Codable {
     var text: String
     var status: Bool
 }
@@ -259,7 +261,7 @@ extension TerminalPresentation {
         )
     }
 }
-struct ArtifactReference: Identifiable, Equatable, Sendable {
+struct ArtifactReference: Identifiable, Equatable, Sendable, Codable {
     var path: String
     var id: String { path }
     var name: String { (path as NSString).lastPathComponent }
@@ -335,6 +337,19 @@ extension TerminalPresentation {
             guard !path.contains("://"), !path.contains("\0"), extensions.contains((path as NSString).pathExtension.lowercased()), seen.insert(path).inserted else { return nil }
             return ArtifactReference(path: path)
         }
+    }
+    /// Retain complete terminal-derived messages, including a single oversized
+    /// message. The archive owns older rows; never cut into a fenced block.
+    static func retainedHistory(_ raw: String, kind: String?) -> String {
+        guard raw.count > 250_000 else { return raw }
+        let parsed = messages(raw, kind: kind)
+        var kept: [SessionMessage] = []; var count = 0
+        for message in parsed.reversed() {
+            if !kept.isEmpty && count + message.text.count > 250_000 { break }
+            kept.append(message); count += message.text.count
+        }
+        let marker = kind == "codex" ? "› " : "❯ "
+        return kept.reversed().map { ($0.fromUser ? marker : "") + $0.text }.joined(separator: "\n")
     }
     static func mergeHistory(_ history: String, live: String) -> String {
         if history.isEmpty { return live }

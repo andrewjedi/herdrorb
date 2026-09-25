@@ -25,6 +25,7 @@ struct Agent: Identifiable, Codable, Hashable {
     var workspaceLabel: String?
     var tabLabel: String?
     var profileIdentity: String?
+    var providerSession: ProviderSessionReference? = nil
     var id: String { machineID + ":" + terminal_id + ":" + pane_id }
     var label: String { tabLabel ?? title ?? name ?? agent ?? "Terminal" }
     var kind: String { agent == "claude" ? "Claude Code" : (agent ?? "Terminal").capitalized }
@@ -64,6 +65,10 @@ enum HerdrClient {
         return [.local] + (try JSONDecoder().decode([Machine].self, from: data)).filter(\.enabled)
     }
     static func sessionName(kind: String, id: UUID = UUID()) -> String { "bubble-" + kind.lowercased() + "-" + id.uuidString.lowercased().prefix(8) }
+    static func sessionReference(_ value: Any?) -> ProviderSessionReference? {
+        guard let value, JSONSerialization.isValidJSONObject(value), let data = try? JSONSerialization.data(withJSONObject: value) else { return nil }
+        return try? JSONDecoder().decode(ProviderSessionReference.self, from: data)
+    }
     static func inventory(_ result: [String: Any], machine: Machine) throws -> [Agent] {
         guard let snapshot = result["snapshot"] as? [String: Any], let protocolVersion = snapshot["protocol"] as? Int else { throw BridgeError.message("Herdr did not return a session snapshot") }
         guard protocolVersion == HerdrInstallation.supportedProtocol else { throw RPCError(code: "incompatible", message: "Herdr on \(machine.label) uses protocol \(protocolVersion). This build supports protocol 22; update compatible installations before connecting.") }
@@ -79,7 +84,8 @@ enum HerdrClient {
                          title: live?["title"] as? String, agent_status: live?["agent_status"] as? String ?? "shell", pane_id: paneID,
                          cwd: pane["cwd"] as? String, machineID: machine.id, tabID: pane["tab_id"] as? String,
                          workspaceID: pane["workspace_id"] as? String, workspaceLabel: workspace?["label"] as? String,
-                         tabLabel: tab?["label"] as? String, profileIdentity: machine.identity)
+                         tabLabel: tab?["label"] as? String, profileIdentity: machine.identity,
+                         providerSession: sessionReference(live?["agent_session"]) ?? sessionReference(pane["agent_session"]))
         }
     }
 }
@@ -100,6 +106,16 @@ struct PendingMessage: Identifiable, Equatable {
     }
     var history = ""
     @Published var contextUsage: ContextUsage?
+    @Published var transcriptNotice: String?
+    @Published var structuredHistory = false
+    @Published var earlierMessages = 0
+    @Published var totalMessages = 0
+    @Published var loadingHistory = false
+    @Published var browsingHistory = false
+    var lastVisited = Date()
+    var imageInstructionsSent = false
+    var lastProviderAttempt = Date.distantPast
+
     @Published var activityMessage: String?
     @Published var messages: [SessionMessage] = []
     var messageRevision = 0
@@ -157,6 +173,8 @@ struct PendingMessage: Identifiable, Equatable {
     private var states: [String: SessionState] = [:]
     private var observers: [String: [AnyCancellable]] = [:]
     private let emptyState = SessionState(identity: "empty")
+    private let archive: ConversationArchive
+    private let transcriptReader: ProviderTranscriptReader
     private let cache: ConversationCache
     private let sessionNames: SessionNames
     let preferences: UserDefaults
@@ -183,6 +201,8 @@ struct PendingMessage: Identifiable, Equatable {
     var activeSessions: [Agent] { agents.filter { !$0.isShell } }
     var attention: Int { activeSessions.filter { $0.agent_status == "blocked" || state($0).unread }.count }
     init(cache: ConversationCache = ConversationCache(), preferences: UserDefaults = AppPreferences.current, isDemo: Bool = false, probeAgents: @escaping (Machine) async throws -> AgentAvailability = { try await AgentAvailability.check($0) }, discover: @escaping () async throws -> [Machine] = { try await HerdrClient.machines() }, makeTransport: @escaping (Machine) -> any HerdrConnection = { MachineTransport($0) }) {
+        let archive = ConversationArchive(directory: cache.directoryURL)
+        self.archive = archive; self.transcriptReader = ProviderTranscriptReader(archive: archive)
         self.cache = cache; self.makeTransport = makeTransport; self.discover = discover
         self.isDemo = isDemo; self.probeAgents = probeAgents
         self.showingSetup = !isDemo && !preferences.bool(forKey: "completedSetup")
@@ -213,6 +233,7 @@ struct PendingMessage: Identifiable, Equatable {
     func start() async {
         guard !started else { return }; started = true
         await cache.setEnabled(savingConversations)
+        try? await archive.setPersistent(savingConversations)
         let inventory = await cache.loadInventory()
         if !inventory.isEmpty {
             machines = inventory.map(\.machine); agents = inventory.flatMap(\.agents)
@@ -322,7 +343,18 @@ struct PendingMessage: Identifiable, Equatable {
             if connection[machine.id] != .online { connection[machine.id] = .online }; lastUpdated = Date()
             if let selected, selected.machineID == machine.id {
                 if let fresh = found.first(where: { $0.id == selected.id && (!$0.isShell || state(selected).terminal) }) {
-                    if self.selected != fresh { self.selected = fresh }
+                    if ConversationCache.key(for: selected) != ConversationCache.key(for: fresh) {
+                        let oldState = state(selected)
+                        if !oldState.busy && !oldState.liveReadInFlight {
+                            if selected.providerSession == nil && selected.agent == fresh.agent {
+                                let linked = state(fresh)
+                                if linked.draft.isEmpty { linked.draft = oldState.draft }
+                                linked.pending = oldState.pending
+                                linked.imageInstructionsSent = oldState.imageInstructionsSent
+                            }
+                            await choose(fresh)
+                        }
+                    } else if self.selected != fresh { self.selected = fresh }
                 } else { showMachine(machine.id) }
             }
             let inventory = machines.map { machine in MachineInventory(machine: machine, agents: agents.filter { $0.machineID == machine.id }) }
@@ -342,25 +374,30 @@ struct PendingMessage: Identifiable, Equatable {
     }
     func choose(_ agent: Agent) async {
         guard !agent.isShell else { showMachine(agent.machineID); return }
-        if selected?.id == agent.id && liveTask != nil { return }
+        if selected.map(ConversationCache.key) == ConversationCache.key(for: agent) && liveTask != nil { return }
         persistCurrent(); liveTask?.cancel(); selectionVersion += 1
         let version = selectionVersion, started = Date()
         selected = agent
         selectedMachineID = agent.machineID
         preferences.set(agent.machineID, forKey: "lastMachine")
         preferences.set(ConversationCache.key(for: agent), forKey: "lastSession")
-        let state = state(agent); state.unread = false
+        let state = state(agent); state.unread = false; state.lastVisited = Date()
         if !state.restored {
             state.restored = true
             let snapshot = await cache.snapshot(for: agent)
             if let snapshot {
                 state.output = snapshot.text; state.history = snapshot.history
+                state.imageInstructionsSent = snapshot.imageInstructionsSent ?? false
                 if state.draft.isEmpty { state.draft = snapshot.draft }
                 state.follow = snapshot.follow; state.scrollAnchor = snapshot.scrollAnchor; state.scrollOffset = snapshot.scrollOffset
-                await parse(agent, state: state)
+                if let messages = snapshot.messages {
+                    state.messages = messages; state.messageRevision += 1
+                } else { await parse(agent, state: state) }
             }
         }
+        if let page = try? await archive.page(session: ConversationCache.key(for: agent)), !page.messages.isEmpty { applyPage(page, to: state) }
         guard version == selectionVersion else { return }
+        await evictInactiveHistories(keeping: state.identity)
         Metrics.record("session.cached-display", milliseconds: Date().timeIntervalSince(started) * 1000)
         resumeLive()
     }
@@ -383,7 +420,7 @@ struct PendingMessage: Identifiable, Equatable {
                 // Herdr 0.9.1 rejects output-change waits at runtime. Keep visible reads
                 // lightweight and adaptive over the retained connection; status is event-driven.
                 let working = self.selected?.agent_status == "working" || state.busy
-                do { try await Task.sleep(nanoseconds: working ? 100_000_000 : 500_000_000) } catch { break }
+                do { try await Task.sleep(nanoseconds: agent.machineID != "local" ? 1_000_000_000 : working ? 150_000_000 : 500_000_000) } catch { break }
             }
         }
     }
@@ -409,9 +446,35 @@ struct PendingMessage: Identifiable, Equatable {
         let state = state(agent)
         guard !state.reading && !state.liveReadInFlight && !state.settingsBusy else { return }
         state.liveReadInFlight = true
-        if state.output.isEmpty { state.reading = true }
+        if state.messages.isEmpty { state.reading = true }
         defer { state.liveReadInFlight = false; if state.reading { state.reading = false } }
         do {
+            if agent.providerSession != nil, Date().timeIntervalSince(state.lastProviderAttempt) > (state.structuredHistory ? 0 : 5) {
+                state.lastProviderAttempt = Date()
+                do {
+                    let machine = machines.first { $0.id == agent.machineID } ?? .local
+                    let update = try await transcriptReader.refresh(agent: agent, machine: machine)
+                    try Task.checkCancellation()
+                    if let page = update.page {
+                        state.totalMessages = page.total
+                        if (state.follow && !state.browsingHistory) || state.messages.isEmpty || !state.structuredHistory { applyPage(page, to: state) }
+                    }
+                    if !state.structuredHistory { state.output = ""; state.history = ""; state.lastCleanOutput = nil }
+                    state.structuredHistory = true
+                    if state.cached { state.notice = nil }
+                    state.cached = false
+                    state.transcriptNotice = update.catchingUp ? "Loading saved messages…" : savingConversations ? nil : "Saving is off. Older messages may be released from memory."
+                    let usage = update.catchingUp ? nil : update.usage
+                    if state.contextUsage != usage { state.contextUsage = usage }
+                    if update.page != nil { persist(agent) }
+                    return
+                } catch is CancellationError { throw CancellationError() }
+                catch {
+                    state.transcriptNotice = "Saved messages unavailable: \(error.localizedDescription)"
+                    if state.structuredHistory { state.cached = true; state.contextUsage = nil; return }
+                }
+            } else if state.structuredHistory { return }
+            state.transcriptNotice = "Terminal view: some earlier output may be missing. Connect saved history for complete messages."
             let result = try await transport.call("pane.read", ["pane_id": agent.pane_id, "source": "visible", "format": "text", "strip_ansi": true])
             try Task.checkCancellation()
             guard !state.settingsBusy else { return }
@@ -427,8 +490,8 @@ struct PendingMessage: Identifiable, Equatable {
                 let update = await Task.detached(priority: .userInitiated) {
                     let clean = TerminalPresentation.conversation(text, kind: agent.agent)
                     guard clean != lastClean else { return (clean, history, previous) }
-                    let merged = String(TerminalPresentation.mergeHistory(history, live: clean).suffix(250_000))
-                    return (clean, merged, TerminalPresentation.messages(merged, kind: agent.agent, previous: previous))
+                    let merged = TerminalPresentation.mergeHistory(history, live: clean)
+                    return (clean, TerminalPresentation.retainedHistory(merged, kind: agent.agent), TerminalPresentation.messages(merged, kind: agent.agent, previous: previous))
                 }.value
                 try Task.checkCancellation()
                 guard state.parseVersion == version, !state.settingsBusy else { return }
@@ -438,13 +501,14 @@ struct PendingMessage: Identifiable, Equatable {
                 let changed = state.messages != update.2
                 if changed {
                     updateConversationAnchor(state, messages: update.2)
-                    state.messageRevision += 1
-                    state.messages = update.2
+                    try await archive.replaceFallback(update.2, session: state.identity)
+                    if (state.follow && !state.browsingHistory) || state.messages.isEmpty {
+                        applyPage(try await archive.page(session: state.identity), to: state)
+                    }
                 }
-                let pending = state.pending.filter { !text.contains($0.text) }
-                let delivered = state.pending != pending
-                if delivered { state.pending = pending }
-                if changed || delivered { persist(agent) }
+                // Terminal text is never a delivery acknowledgement: it can be
+                // an old prompt, a quotation, or another writer's input.
+                if changed { persist(agent) }
             }
         } catch {
             if !Task.isCancelled { state.notice = error.localizedDescription; state.cached = true }
@@ -471,16 +535,8 @@ struct PendingMessage: Identifiable, Equatable {
         }
     }
     func loadHistory() async {
-        guard let agent = selected, canInteract(agent), let transport = transports[agent.machineID] else { return }
-        let state = state(agent)
-        guard !state.reading, !state.settingsBusy else { return }
-        liveTask?.cancel(); state.reading = true
-        defer { state.reading = false; resumeLive() }
-        do {
-            let result = try await transport.call(agent.isShell ? "pane.read" : "agent.read", [agent.isShell ? "pane_id" : "target": agent.pane_id, "source": "recent_unwrapped", "lines": 1000, "format": "text"], timeout: 25)
-            guard let read = result["read"] as? [String: Any], let text = read["text"] as? String else { return }
-            state.history = TerminalPresentation.conversation(text, kind: agent.agent); await parse(agent, state: state); persist(agent)
-        } catch { state.notice = error.localizedDescription }
+        guard let agent = selected else { return }
+        await historyPage(agent, earlier: true)
     }
     func canChangeAgentSettings(_ agent: Agent) -> Bool {
         let current = agents.first { $0.id == agent.id && $0.profileIdentity == agent.profileIdentity } ?? agent
@@ -642,10 +698,14 @@ struct PendingMessage: Identifiable, Equatable {
         state.pending.append(pending); state.draft = ""; state.busy = true; state.notice = nil; persist(agent)
         defer { state.busy = false }
         do {
-            let prompt = ConversationImageInstructions.prompt(text, kind: agent.agent)
+            let prompt = state.imageInstructionsSent ? text : ConversationImageInstructions.prompt(text, kind: agent.agent)
             _ = try await transport.call("agent.prompt", ["target": agent.pane_id, "text": prompt], timeout: 20)
             if let index = state.pending.firstIndex(where: { $0.id == pending.id }) {
-                state.pending[index].state = agent.agent_status == "working" ? "Delivered · \(agent.kind) may queue this follow-up" : "Delivered to \(agent.kind)"
+                state.pending[index].state = "Sent to \(agent.kind) terminal · agent receipt not confirmed"
+                state.imageInstructionsSent = true
+                let accepted = state.pending.filter { $0.state.hasPrefix("Sent to ") }.dropLast(8).map(\.id)
+                state.pending.removeAll { accepted.contains($0.id) }
+                persist(agent)
             }
         } catch {
             if let index = state.pending.firstIndex(where: { $0.id == pending.id }) { state.pending[index].state = "Not confirmed" }
@@ -697,6 +757,14 @@ struct PendingMessage: Identifiable, Equatable {
             guard let pane = result["root_pane"] as? [String: Any], let paneId = pane["pane_id"] as? String else { throw BridgeError.message("Tab created without a pane ID") }
             paneID = paneId
             await refreshMachine(machine)
+            // Prepare session reporting before starting the CLI. Never start a
+            // second provider process merely to observe a running conversation.
+            if transport is MachineTransport {
+                if kind == "codex" { try await ProviderBridge.connectCodex(machine: machine) }
+                else if kind == "claude", let cwd = pane["cwd"] as? String ?? (folder.isEmpty ? nil : folder) {
+                    try await ProviderBridge.connectClaude(machine: machine, cwd: cwd)
+                }
+            }
             _ = try await transport.call("agent.start", ["name": HerdrClient.sessionName(kind: kind), "kind": kind, "pane_id": paneId, "timeout_ms": 30_000], timeout: 35)
             await refreshMachine(machine)
             if let agent = agents.first(where: { $0.machineID == machine.id && $0.pane_id == paneId }) { await choose(agent) }
@@ -744,6 +812,8 @@ struct PendingMessage: Identifiable, Equatable {
         savingConversations = enabled
         preferences.set(enabled, forKey: "saveConversations")
         await cache.setEnabled(enabled)
+        do { try await archive.setPersistent(enabled) }
+        catch { privacyNotice = error.localizedDescription }
         if !enabled {
             do { try await cache.clear() }
             catch { privacyNotice = "Saving is off, but existing cache files could not be removed: \(error.localizedDescription)" }
@@ -755,6 +825,7 @@ struct PendingMessage: Identifiable, Equatable {
         for task in saveTasks.values { task.cancel(); await task.value }
         saveTasks.removeAll()
         do {
+            try await archive.clear()
             try await cache.clear()
             // Retain live terminal connections and unsent in-memory drafts.
             for state in states.values { state.history = state.output; state.lastCleanOutput = nil }
@@ -783,11 +854,75 @@ struct PendingMessage: Identifiable, Equatable {
         } catch { failedLaunches[machine.id]?.detail = error.localizedDescription }
     }
 
+    private func applyPage(_ page: ConversationArchive.Page, to state: SessionState) {
+        state.earlierMessages = page.earlier
+        state.totalMessages = page.total
+        if state.messages != page.messages {
+            state.messageRevision += 1
+            state.messages = page.messages
+            state.scrollAnchor = page.messages.first?.id
+        }
+    }
+    func historyPage(_ agent: Agent, earlier: Bool) async {
+        let state = state(agent)
+        guard !state.loadingHistory else { return }
+        state.loadingHistory = true; defer { state.loadingHistory = false }
+        do {
+            let page = try await archive.page(session: state.identity, before: earlier ? state.messages.first?.id : nil)
+            state.browsingHistory = earlier; state.follow = !earlier; state.scrollOffset = earlier ? 0 : nil
+            applyPage(page, to: state)
+            persist(agent)
+        } catch { state.notice = error.localizedDescription }
+    }
+    func searchHistory(_ agent: Agent, query: String, before: String? = nil) async throws -> ConversationArchive.Page {
+        try await archive.page(session: ConversationCache.key(for: agent), before: before, search: query)
+    }
+    func dismissReceipt(_ id: UUID, agent: Agent) { state(agent).pending.removeAll { $0.id == id } }
+    func connectHistory(_ agent: Agent) async {
+        let state = state(agent)
+        guard !isDemo else { state.notice = "Provider connections are unavailable in demo mode."; return }
+        guard !state.settingsBusy, let machine = machines.first(where: { $0.id == agent.machineID }) else { return }
+        state.settingsBusy = true; defer { state.settingsBusy = false; resumeLive() }
+        do {
+            if agent.agent == "claude" {
+                guard let cwd = agent.cwd else { throw BridgeError.message("This session has no project folder.") }
+                try await ProviderBridge.connectClaude(machine: machine, cwd: cwd)
+                state.notice = "Claude context and history connected. The CLI will refresh its status line."
+            } else {
+                try await ProviderBridge.connectCodex(machine: machine)
+                if !["working", "blocked"].contains(agent.agent_status), let connection = transports[agent.machineID],
+                   let id = try await CodexSettingsBridge(connection: connection, paneID: agent.pane_id).identifySession() {
+                    _ = try await connection.call("pane.report_agent_session", ["pane_id": agent.pane_id, "source": "herdrorb:codex", "agent": "codex", "agent_session_id": id])
+                    state.notice = "Codex saved history connected."
+                } else {
+                    state.notice = "Codex integration installed. Connect again when the agent is idle, or resume the session in Terminal."
+                }
+            }
+            await refreshMachine(machine)
+        } catch { state.notice = error.localizedDescription }
+    }
+    /// Evict heavy history only; lightweight drafts, receipts, and unread flags survive.
+    /// Dirty state is flushed before releasing it. Reload comes from the archive.
+    func evictInactiveHistories(keeping key: String) async {
+        let candidates = states.values.filter { $0.identity != key && !$0.busy && !$0.liveReadInFlight && !$0.settingsBusy && !$0.terminal && !$0.messages.isEmpty }
+            .sorted { $0.lastVisited > $1.lastVisited }
+        guard candidates.count > 3 else { return }
+        for state in candidates.dropFirst(3) {
+            if let agent = agents.first(where: { ConversationCache.key(for: $0) == state.identity }) {
+                persist(agent); await saveTasks[agent.id]?.value
+            }
+            state.messages = []; state.messageRevision += 1
+            state.output = ""; state.history = ""; state.lastCleanOutput = nil
+            state.restored = false
+        }
+        await cache.flush()
+    }
+
     func persistCurrent() { if let selected { persist(selected) } }
     func persist(_ agent: Agent) {
         guard savingConversations, !suppressPersistence, !isDemo else { return }
         let state = state(agent)
-        let snapshot = ConversationCache.Snapshot(text: state.output, updatedAt: Date(), draft: state.draft, follow: state.follow, scrollAnchor: state.scrollAnchor, history: state.history, scrollOffset: state.scrollOffset)
+        let snapshot = ConversationCache.Snapshot(text: state.output, updatedAt: Date(), draft: state.draft, follow: state.follow, scrollAnchor: state.scrollAnchor, history: state.history, scrollOffset: state.scrollOffset, messages: Array(state.messages.suffix(40)), imageInstructionsSent: state.imageInstructionsSent)
         saveTasks[agent.id]?.cancel()
         saveTasks[agent.id] = Task { await cache.store(snapshot, for: agent) }
     }
@@ -798,6 +933,7 @@ struct PendingMessage: Identifiable, Equatable {
         for task in saveTasks.values { await task.value }
         await cache.flush()
         for transport in transports.values { await transport.shutdown() }
+        await RemoteTranscriptConnections.shared.stop()
     }
 }
 

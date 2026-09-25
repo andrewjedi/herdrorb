@@ -109,7 +109,8 @@ final class ConversationPerformanceTests: XCTestCase {
         print("PERF \(useRows ? "visible rows" : "whole transcript") scroll CPU frame median: \(samples.sorted()[45]) ms; p95: \(samples.sorted()[85]) ms; worst: \(samples.max()!) ms")
         XCTAssertGreaterThan(scroll.contentView.bounds.minY, 0)
         if useRows {
-            XCTAssertEqual(document.attachedRowCount, messages.count)
+            XCTAssertLessThanOrEqual(document.attachedRowCount, 24)
+            XCTAssertLessThanOrEqual(document.retainedHostCount, 24, "Offscreen hosting controllers must be released")
             XCTAssertLessThan(document.visibleRowCount, 12)
             XCTAssertEqual(document.measurementCount, messages.count, "Scrolling must not remeasure rows")
             document.disconnect()

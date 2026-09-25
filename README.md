@@ -112,9 +112,18 @@ structured agent history, and it doesn't reproduce Codex desktop's edit/Undo
 cards. Terminal is the authoritative interactive view. Approvals stay with the
 underlying agents; uncertain prompt sends are never automatically retried.
 
-Long conversations initially show the latest 40 messages. **Show earlier messages**
-loads more while preserving your reading position, and search includes the retained
-history. Scrolling upward pauses automatic following; returning to the bottom resumes it.
+Connected Codex and Claude sessions read complete messages from their saved provider
+transcripts. **Connect history** links an existing session; Claude also connects its
+context telemetry while preserving your existing status line. New sessions prepare
+this integration before launch. The upper-right context meter uses provider data
+and shows an unavailable state when there is no valid reading.
+
+Long conversations show a 40-message page. **Earlier messages** reads a previous
+page from the local archive; **Back to latest** returns to current replies. Search
+includes archived messages outside that page. Large replies have an **Open complete
+message** action with search and copying, so a giant reply does not stall the chat.
+Terminal-only sessions remain available as an explicitly approximate fallback.
+See [conversation reliability](docs/CONVERSATION-RELIABILITY.md) for setup and limits.
 
 Conversation text and drafts are saved locally by default, with private file
 permissions and bounded retention, without application-level encryption.

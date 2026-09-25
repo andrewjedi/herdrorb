@@ -4,6 +4,7 @@ typealias CodexSessionSettings = SessionComposerSettings
 
 /// Values confirmed by the connected CLI. An absent value is deliberately not a default.
 struct SessionComposerSettings: Equatable {
+    var providerSessionID: String?
     var access: String?
     var model: String?
     var effort: String?
@@ -21,6 +22,7 @@ struct SessionComposerSettings: Equatable {
 
     func merging(_ other: Self) -> Self {
         var result = self
+        result.providerSessionID = other.providerSessionID ?? providerSessionID
         result.access = other.access ?? access
         result.model = other.model ?? model
         result.effort = other.effort ?? effort
@@ -79,6 +81,9 @@ struct SessionComposerSettings: Equatable {
         if let match = captures(#"(?im)Permissions:\s+([^│\n]+)"#, in: text, last: true) {
             result.access = accessID(match[0])
         }
+        if let match = captures(#"(?im)^\s*[│|]?\s*Session(?: ID)?:\s*([0-9a-f-]{36})\b"#, in: text, last: true), UUID(uuidString: match[0]) != nil {
+            result.providerSessionID = match[0].lowercased()
+        }
         return result
     }
 
@@ -100,6 +105,10 @@ struct CodexSettingsBridge {
     let paneID: String
     private let interaction = CodexSettingsInteraction()
 
+    func identifySession() async throws -> String? {
+        do { return try await readStatus().providerSessionID }
+        catch { await cleanUpOwnedMenus(); throw error }
+    }
     func read() async throws -> CodexSessionSettings {
         do {
             var settings = try await readStatus()

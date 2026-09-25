@@ -114,7 +114,7 @@ final class ReadinessTests: XCTestCase {
         preferences.set(false, forKey: "saveConversations")
         let transport = LaunchFixture()
         var installed = false
-        let model = BubbleModel(preferences: preferences, probeAgents: { _ in AgentAvailability(codex: installed, claude: false) },
+        let model = BubbleModel(cache: ConversationCache(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)), preferences: preferences, probeAgents: { _ in AgentAvailability(codex: installed, claude: false) },
                                 discover: { [.local] }, makeTransport: { _ in transport })
         await model.start()
         for _ in 0..<50 where model.connection["local"] != .online { try await Task.sleep(nanoseconds: 10_000_000) }

@@ -185,7 +185,7 @@ struct PendingMessageView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 10) {
                 if state.hasPrefix("Sending") { ProgressView().controlSize(.small) }
-                else { Image(systemName: state.hasPrefix("Delivered") ? "checkmark.circle" : "exclamationmark.circle").foregroundStyle(OrbTheme.secondary) }
+                else { Image(systemName: state.hasPrefix("Sent to ") ? "arrow.up.circle" : state.hasPrefix("Delivered") ? "checkmark.circle" : "exclamationmark.circle").foregroundStyle(OrbTheme.secondary) }
                 Text(state).font(.system(size: 13)).foregroundStyle(OrbTheme.secondary)
                 Spacer()
                 Image(systemName: "arrow.up").font(.system(size: 19, weight: .medium))

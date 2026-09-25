@@ -1,8 +1,42 @@
 import Foundation
 
 /// A provider-reported terminal footer reading, never an estimate from chat length.
-struct ContextUsage: Equatable, Sendable {
+struct ContextUsage: Equatable, Sendable, Codable {
     let usedPercent: Double
+    var source: String = "Terminal footer"
+    var sessionID: String? = nil
+    var model: String? = nil
+    var capacity: Int? = nil
+    var tokens: Int? = nil
+    var observedAt: Date? = nil
+
+    static func codex(info: [String: Any]?, sessionID: String?, model: String?, observedAt: Date) -> Self? {
+        guard let info, let capacity = info["model_context_window"] as? Int, capacity > 0,
+              let last = info["last_token_usage"] as? [String: Any], let total = last["total_tokens"] as? Int, total >= 0 else { return nil }
+        // Same baseline normalization as Codex's own context-remaining indicator.
+        let effective = capacity - 12_000
+        let remaining = effective > 0 ? (Double(max(0, effective - max(0, total - 12_000))) / Double(effective) * 100).rounded() : 0
+        return Self(usedPercent: min(100, max(0, 100 - remaining)), source: "Codex session usage", sessionID: sessionID, model: model, capacity: capacity, tokens: total, observedAt: observedAt)
+    }
+    static func claude(_ json: [String: Any], sessionID: String) -> Self? {
+        guard (json["session_id"] as? String)?.lowercased() == sessionID.lowercased(),
+              let window = json["context_window"] as? [String: Any],
+              let usage = window["current_usage"] as? [String: Any],
+              let capacity = window["context_window_size"] as? Int, capacity > 0 else { return nil }
+        let input = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].compactMap { usage[$0] as? Int }
+        guard input.count == 3, input.allSatisfy({ $0 >= 0 }) else { return nil }
+        var tokens = 0
+        for value in input {
+            let sum = tokens.addingReportingOverflow(value)
+            guard !sum.overflow else { return nil }
+            tokens = sum.partialValue
+        }
+        let percent = window["used_percentage"] as? Double ?? Double(tokens) / Double(capacity) * 100
+        guard percent.isFinite, (0...100).contains(percent) else { return nil }
+        return Self(usedPercent: percent, source: "Claude status-line telemetry", sessionID: sessionID,
+            model: (json["model"] as? [String: Any])?["id"] as? String, capacity: capacity, tokens: tokens,
+            observedAt: (json["herdrorb_observed_at"] as? Double).map { Date(timeIntervalSince1970: $0) })
+    }
 
     static func footer(in raw: String, provider: String?) -> ContextUsage? {
         guard provider == "codex" || provider == "claude" else { return nil }

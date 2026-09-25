@@ -6,6 +6,8 @@ import SwiftTerm
 /// machine profiles, or read project folders. They use the same production views.
 enum DesignPreviewScreen: String, CaseIterable {
     case imageConversation = "18-image-conversation"
+    case structuredCodex = "19-structured-codex"
+    case structuredClaude = "20-structured-claude"
     case conversation = "01-conversation"
     case terminal = "02-terminal"
     case newSession = "03-new-session"
@@ -112,6 +114,20 @@ struct DemoTerminal: NSViewRepresentable {
         model.preferences.set(false, forKey: "orbHoverSound")
         model.preferences.set(OrbStyle.nebula.rawValue, forKey: "orbStyle")
         switch screen {
+        case .structuredCodex, .structuredClaude:
+            let provider = screen == .structuredClaude ? "claude" : "codex"
+            model.selected = model.agents[screen == .structuredClaude ? 1 : 0]
+            model.selectedMachineID = model.selected!.machineID
+            let answer = "## Saved conversation connected\n\nMessages are recovered from the provider’s saved session, including replies written while the app was hidden.\n\n- Complete messages stay in the archive.\n- Search includes earlier pages.\n- The context meter uses provider usage data."
+            model.current.messages = [
+                SessionMessage(id: "fixture-user", fromUser: true, text: "Keep this long conversation easy to follow.", parts: [.init(text: "Keep this long conversation easy to follow.", status: false)], source: provider),
+                SessionMessage(id: "fixture-reply", fromUser: false, text: answer, parts: [.init(text: answer, status: false)], phase: "final_answer", source: provider)
+            ]
+            model.current.structuredHistory = true
+            model.current.earlierMessages = 200
+            model.current.totalMessages = 202
+            model.current.contextUsage = ContextUsage(usedPercent: provider == "codex" ? 28 : 63, source: provider == "codex" ? "Codex session usage" : "Claude status-line telemetry", sessionID: "fictional-demo", model: provider == "codex" ? "gpt-6-astra" : "claude-opus", capacity: 200000, observedAt: Date())
+            model.current.messageRevision += 1
         case .imageConversation:
             let file = imageFixtureURL
             let prompt = ConversationImageInstructions.prompt("Generate an illustration of a planet in space.", kind: "codex")

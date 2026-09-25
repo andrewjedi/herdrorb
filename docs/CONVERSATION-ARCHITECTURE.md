@@ -1,5 +1,7 @@
 # Conversation architecture and long-chat review
 
+**Implementation update:** the P1/P2 follow-up is implemented. See [Conversation reliability](CONVERSATION-RELIABILITY.md) for the current behavior, setup, and validation. The findings and measurements below describe the earlier review.
+
 Reviewed September 24, 2026 against the current working tree and installed Herdr protocol 22 schema. Existing uncommitted UI/performance work was preserved. This review distinguishes present behavior from the proposed structured integration.
 
 ## What happens today

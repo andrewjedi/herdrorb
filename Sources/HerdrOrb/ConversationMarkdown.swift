@@ -29,7 +29,7 @@ struct ConversationMarkdown: View, Equatable {
     }
     var body: some View {
         // Parse once per changed message, not twice for every block's spacing.
-        let blocks = ConversationBlock.parse(text).filter { !$0.text.isEmpty }
+        let blocks = MarkdownBlockCache.blocks(text)
         return VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 blockView(block, index: index).padding(.top, gap(before: index, blocks: blocks))
@@ -60,5 +60,27 @@ struct ConversationMarkdown: View, Equatable {
                 .background(OrbTheme.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(OrbTheme.line, lineWidth: 0.8))
         }
+    }
+}
+
+/// Bounded immutable parse cache shared by recycled row hosts. Changes to a tail
+/// do not evict/reparse every completed message. NSCache controls memory pressure.
+private enum MarkdownBlockCache {
+    final class Value {
+        let blocks: [ConversationBlock]
+        init(_ blocks: [ConversationBlock]) { self.blocks = blocks }
+    }
+    static let cache: NSCache<NSString, Value> = {
+        let cache = NSCache<NSString, Value>()
+        cache.totalCostLimit = 8 * 1024 * 1024
+        cache.countLimit = 256
+        return cache
+    }()
+    static func blocks(_ text: String) -> [ConversationBlock] {
+        let key = text as NSString
+        if let value = cache.object(forKey: key) { return value.blocks }
+        let blocks = ConversationBlock.parse(text).filter { !$0.text.isEmpty }
+        cache.setObject(Value(blocks), forKey: key, cost: text.utf8.count * 3 + blocks.count * 64)
+        return blocks
     }
 }

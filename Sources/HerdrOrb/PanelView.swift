@@ -297,7 +297,7 @@ struct PanelView: View {
         }.padding(.horizontal, 18).frame(height: 52)
     }
     func conversation(_ agent: Agent) -> some View {
-        SessionConversation(model: model, agent: agent, machine: model.machines.first { $0.id == agent.machineID } ?? .local, session: model.state(agent)).id(agent.id)
+        SessionConversation(model: model, agent: agent, machine: model.machines.first { $0.id == agent.machineID } ?? .local, session: model.state(agent)).id(ConversationCache.key(for: agent))
     }
 
     var emptyState: some View {

@@ -261,6 +261,7 @@ struct ConversationRows: NSViewRepresentable {
                 coordinator.restore(to: version.filter.isEmpty ? offset ?? 0 : 0)
             }
             let prepending = coordinator.version.map { $0.prepend != version.prepend && $0.filter == version.filter } ?? false
+            if let old = coordinator.version, old.historyStart != version.historyStart && old.messages != version.messages && !follow { coordinator.restore(to: offset ?? 0) }
             coordinator.version = version
             coordinator.replaceRows(rows, preservingBottomDistance: prepending)
         } else if followChanged || !coordinator.restored { coordinator.scheduleLayout(measure: false) }
@@ -271,18 +272,25 @@ struct ConversationRows: NSViewRepresentable {
 final class ConversationRowDocument: NSView {
     private final class Cell {
         var entry: ConversationRowEntry
-        let host: NSHostingController<AnyView>
+        var host: NSHostingController<AnyView>?
         var height: CGFloat = 0
         var width: CGFloat = -1
         var rect = NSRect.zero
+        var lastVisible: UInt64 = 0
         init(_ entry: ConversationRowEntry) {
             self.entry = entry
-            host = NSHostingController(rootView: entry.content())
-            host.sizingOptions = []
+        }
+        func hosting() -> NSHostingController<AnyView> {
+            if let host { return host }
+            let result = NSHostingController(rootView: entry.content())
+            result.sizingOptions = []
+            host = result
+            return result
         }
     }
     override var isFlipped: Bool { true }
     private var cells: [Cell] = []
+    private var visibilityClock: UInt64 = 0
     private weak var scroll: NSScrollView?
     private var observer: NSObjectProtocol?
     private(set) var measurementCount = 0
@@ -301,41 +309,64 @@ final class ConversationRowDocument: NSView {
         cells = entries.map { entry in
             guard let cell = previous.removeValue(forKey: entry.id) else { return Cell(entry) }
             if !cell.entry.matches(entry) {
-                cell.host.rootView = entry.content()
+                cell.host?.rootView = entry.content()
                 cell.width = -1
             }
             cell.entry = entry
             return cell
         }
-        for cell in previous.values { cell.host.view.removeFromSuperview() }
+        for cell in previous.values { cell.host?.view.removeFromSuperview() }
     }
     func measure(width: CGFloat) -> CGFloat {
         let rowWidth = max(1, min(780, width - 56))
         var y: CGFloat = 14
         for cell in cells {
             if cell.width != rowWidth {
-                cell.height = ceil(cell.host.sizeThatFits(in: NSSize(width: rowWidth, height: 600)).height)
+                cell.height = ceil(cell.hosting().sizeThatFits(in: NSSize(width: rowWidth, height: 600)).height)
                 cell.width = rowWidth
                 measurementCount += 1
             }
             cell.rect = NSRect(x: (width - rowWidth) / 2, y: y, width: rowWidth, height: cell.height)
-            if cell.host.view.frame != cell.rect { cell.host.view.frame = cell.rect }
+            if let host = cell.host, host.view.frame != cell.rect { host.view.frame = cell.rect }
             y += cell.height + 16
         }
+        pruneHosts()
         return y + 8
     }
     func attachVisibleRows() {
         guard let scroll else { return }
-        // Independent hosting surfaces let AppKit cull offscreen rows without
-        // rebuilding a transcript-wide SwiftUI tree as the clip bounds move.
+        visibilityClock += 1
         let visible = scroll.contentView.bounds.insetBy(dx: 0, dy: -scroll.contentSize.height)
         for cell in cells {
-            let focused = (window?.firstResponder as? NSView)?.isDescendant(of: cell.host.view) == true
-            let hidden = !cell.rect.intersects(visible) && !focused
-            if cell.host.view.isHidden != hidden { cell.host.view.isHidden = hidden }
-            if cell.host.view.superview !== self { addSubview(cell.host.view) }
+            let needed = cell.rect.intersects(visible) || isFocused(cell)
+            if needed {
+                cell.lastVisible = visibilityClock
+                let host = cell.hosting()
+                if host.view.frame != cell.rect { host.view.frame = cell.rect }
+                host.view.isHidden = false
+                if host.view.superview !== self { addSubview(host.view) }
+            } else if let host = cell.host {
+                host.view.isHidden = true
+                if host.view.superview !== self { addSubview(host.view) }
+            }
+        }
+        pruneHosts()
+    }
+    private func pruneHosts() {
+        let visible = scroll?.contentView.bounds.insetBy(dx: 0, dy: -(scroll?.contentSize.height ?? 0)) ?? .zero
+        let optional = cells.enumerated().filter { $0.element.host != nil && !$0.element.rect.intersects(visible) && !isFocused($0.element) }
+            .sorted { $0.element.lastVisible == $1.element.lastVisible ? $0.offset > $1.offset : $0.element.lastVisible < $1.element.lastVisible }
+        let excess = max(0, retainedHostCount - 24)
+        for candidate in optional.prefix(excess) {
+            candidate.element.host?.view.removeFromSuperview()
+            candidate.element.host = nil
         }
     }
+    private func isFocused(_ cell: Cell) -> Bool {
+        guard let host = cell.host, let view = window?.firstResponder as? NSView else { return false }
+        return view.isDescendant(of: host.view)
+    }
+    var retainedHostCount: Int { cells.filter { $0.host != nil }.count }
 
     func disconnect() {
         if let observer { NotificationCenter.default.removeObserver(observer) }

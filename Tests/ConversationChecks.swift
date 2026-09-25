@@ -56,7 +56,7 @@ private final class PasteCheckEditor: ComposerTextView {
         await reopened.save(String(repeating: "x", count: 250_010), for: agent)
         await reopened.flush()
         let limited = await reopened.snapshot(for: agent)
-        assert(limited?.text.count == 250_000)
+        assert(limited?.text.isEmpty == true, "Oversized raw diagnostics must not be sliced into a fake message")
         let writes = await reopened.writes
         await reopened.save(String(repeating: "x", count: 250_010), for: agent)
         await reopened.flush()
