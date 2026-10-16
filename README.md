@@ -1,56 +1,83 @@
+<div align="center">
+
 # herdrorb
 
-A native macOS companion for [Herdr](https://github.com/herdrdev/herdr). Keep
-Codex and Claude Code sessions across your Macs one click away, in a floating
-orb and compact menu-bar panel.
+**Your coding agents, one glowing orb away.**
 
-![herdrorb showing fictional sessions in demo mode](assets/demo.png)
+A native macOS companion for [Herdr](https://github.com/herdrdev/herdr).
+Bring your Codex and Claude Code sessions together across your Macs,
+with a floating galaxy orb and a conversation panel that stays close at hand.
 
-Read formatted conversations, keep drafts when switching sessions, and open the
-actual terminal for approvals, slash commands, and sign-in. Closing herdrorb
-leaves your Herdr sessions running.
+[Get started](#get-started) · [Features](#features) · [Screenshots](#screenshots) · [Releases](https://github.com/andrewjedi/herdrorb/releases)
 
-**Independent community project. Not affiliated with or endorsed by Herdr,
-OpenAI, or Anthropic.**
+<img src="assets/screenshots/orb-menu.png" alt="The new violet galaxy orb connected to its compact menu, with controls to hide, resize, or open agents" width="560">
 
-## Requirements
+*Click to open. Drag to move. Press ⌘⇧D from anywhere.*
 
-- macOS 14 or later. Choose the build for your Mac: `arm64` (Apple Silicon) or
-  `x86_64` (Intel). See the [compatibility and validation table](docs/COMPATIBILITY.md).
-- Herdr **0.9.1, protocol 22**, installed and running on each target Mac.
-- Codex and/or Claude Code installed and authenticated on the Macs where they run.
-- For remote Macs: a saved Herdr machine profile and working noninteractive SSH.
+</div>
 
-## Install and connect
+## A little space for your work
 
-[Releases](https://github.com/andrewjedi/herdrorb/releases) provide source and
-architecture-specific developer-beta archives. **The initial beta is ad-hoc
-signed, not Developer ID signed or notarized.** macOS may block downloaded
-archives. Building from source is the recommended installation path until a
-notarized release is available; do not disable Gatekeeper system-wide.
+Read a reply, pick up a draft, or check another machine without hunting through
+terminal windows. herdrorb keeps your sessions in one sidebar and gives you a
+formatted conversation view alongside the live terminal.
 
-1. [Install Herdr](https://github.com/herdrdev/herdr#install), using a version
-   compatible with the table above, then run `herdr` in Terminal.
-2. Build herdrorb below, or extract the appropriate release archive. Move
-   `herdrorb.app` into Applications.
-3. Open herdrorb. Setup detects a missing installation, stopped server, or
-   unsupported protocol. Use **Locate Herdr…** for a custom executable, or
-   **Check again** after installing or starting Herdr.
-4. Choose **Continue**, then select an existing agent or **New agent**.
-   Agent accounts and sign-in are managed by their CLIs, not by herdrorb.
+![The conversation panel with Codex on This Mac, Claude Code on Studio Mac, a context meter, and composer controls](assets/screenshots/conversation.png)
 
-Press **⌘⇧D** to toggle the panel from any app. Change the shortcut in Settings → Orb → Toggle panel. The borderless panel unfurls from the floating orb with flowing galaxy light; closing draws it back in. Settings also includes a separate switch for its opening and closing sound. Reduce Motion replaces the expansion with a short fade.
+*All screenshots are rendered from the current app using fictional demo sessions.*
 
-The hexagonal menu-bar icon opens the panel even when the orb is hidden. Click
-the orb to open it, drag to reposition it, or right-click the menu-bar icon to
-hide/show the orb or quit. Settings controls appearance, sound, scrolling,
-connection setup, and local data.
+## Features
 
-## Build from source
+| | What you can do |
+| --- | --- |
+| **A living galaxy orb** | Choose Nebula, Aurora, or Supernova. Move it around your desktop, switch to a smaller size, or hide it and use the menu bar. The panel unfurls with flowing galaxy light and an optional sound. Reduce Motion uses a short fade. |
+| **Codex + Claude Code** | Keep both agents in one place. Start an agent in a project folder on your chosen device, then switch sessions while keeping each draft and reading position. |
+| **Readable conversations** | Read Markdown, code, and collapsed activity. Connect saved provider history, browse earlier messages, search archived conversations, and open long replies in a separate reader. |
+| **The live terminal, a click away** | Switch to Terminal for approvals, slash commands, interactive menus, and sign-in. Agent permissions remain with the underlying CLI. |
+| **Controls in the composer** | Choose permissions, model, reasoning effort, and Fast mode where supported. Changes become active after the connected CLI confirms them. Dictate into your draft and review before sending. |
+| **Devices at a glance** | See Herdr and Tailscale status independently, inspect connection details, and manage executable paths and project defaults per device. |
+| **Direct device terminals** | Open a local shell or SSH terminal from the sidebar, even when Herdr is stopped. You can also launch Herdr in its own embedded terminal. |
+| **Images and artifacts** | Preview saved images and supported files from agent replies. Codex image generation uses the connected CLI’s native image tool when available. |
 
-Install Xcode or its command-line tools with a Swift **6.0 or newer** toolchain.
-The exact toolchains exercised by CI and local testing are documented in
-[COMPATIBILITY.md](docs/COMPATIBILITY.md).
+## Screenshots
+
+### Pick your galaxy
+
+**Nebula** brings violet smoke, **Aurora** adds teal and mint, and **Supernova**
+mixes rose and gold. Appearance, connection status, keyboard shortcuts, and sound
+controls live together in Settings.
+
+![Orb settings showing the Nebula, Aurora, and Supernova styles, connection status, keyboard shortcut, and sound options](assets/screenshots/orb-styles.png)
+
+### Know which device is ready
+
+Open a device overview to check its connections, start an agent, launch Herdr,
+or open a terminal directly. Separate Herdr and Tailscale indicators help explain
+why a machine is reachable even when its agent server is stopped.
+
+![Studio Mac overview showing Herdr stopped, Tailscale connected, and actions to start Herdr or open an SSH terminal](assets/screenshots/device-overview.png)
+
+### Go straight to the terminal
+
+Switch from the formatted conversation to the agent’s terminal for approvals,
+slash commands, and interactive prompts. For a separate shell, open a direct
+local or SSH terminal from the device overview.
+
+![The Terminal tab showing a fictional Codex session and release checklist](assets/screenshots/terminal.png)
+
+## Get started
+
+### Requirements
+
+- **macOS 14 or later**, on Apple Silicon (`arm64`) or Intel (`x86_64`).
+- **Herdr 0.9.1, protocol 22**, installed and running on each target Mac.
+- **Codex and/or Claude Code**, installed and authenticated on the Macs where they run.
+- For remote Macs, a saved Herdr machine profile and working noninteractive SSH.
+- To build from source, Xcode or its command-line tools with **Swift 6.0 or newer**.
+
+See the [compatibility and validation table](docs/COMPATIBILITY.md) for tested toolchains.
+
+### Build and open
 
 ```sh
 git clone https://github.com/andrewjedi/herdrorb.git
@@ -59,94 +86,74 @@ sh build-app.sh
 open dist/herdrorb.app
 ```
 
-Swift Package Manager resolves the pinned dependencies in `Package.resolved`.
-The build bundles resources and license notices and uses a local ad-hoc
-signature. No Apple developer account or signing credentials are needed for
-this build. It doesn't install or start Herdr or any agent.
+The build resolves pinned Swift Package Manager dependencies, bundles resources
+and license notices, and applies a local ad-hoc signature. No Apple developer
+account is needed. It does not install or start Herdr or any agent.
 
-## Try the interface without Herdr
+[Release archives](https://github.com/andrewjedi/herdrorb/releases) are also available
+for each architecture. The developer beta is **ad-hoc signed, not Developer ID
+signed or notarized**, so macOS may block downloaded archives. Building from
+source is the recommended installation path until a notarized release is available.
+Do not disable Gatekeeper system-wide.
+
+### Connect your sessions
+
+1. [Install Herdr](https://github.com/herdrdev/herdr#install) at the compatible version above, then run `herdr` in Terminal.
+2. Open herdrorb. Setup checks for a missing installation, stopped server, or unsupported protocol. Use **Locate Herdr…** for a custom executable or **Check again** after starting Herdr.
+3. Choose **Continue**, then select an existing session or **New agent**. Agent accounts and sign-in are managed by their CLIs.
+4. Click the orb or press **⌘⇧D** to open the panel. Change the shortcut in **Settings → Orb → Toggle panel**.
+
+The menu-bar icon remains available when the orb is hidden. Closing the panel
+or quitting herdrorb leaves your Herdr agent sessions running. Direct embedded
+shells are separate and close when you quit the app.
+
+### Try it without Herdr
 
 ```sh
 open -n dist/herdrorb.app --args --demo
 ```
 
 Demo mode uses fictional in-memory sessions and separate preferences. It never
-discovers your machines, connects over SSH, or starts agent processes. Terminal
-attachment and real session creation are unavailable. `--setup-preview` shows
-the missing-Herdr setup state without touching your installations.
+discovers your machines, connects over SSH, or starts agent processes. Real
+session creation and terminal attachment are unavailable. Add `--setup-preview`
+to preview the missing-Herdr setup screen.
 
-## Everyday use
+<details>
+<summary><strong>Everyday controls and session behavior</strong></summary>
 
-- In a Codex conversation, ask for an image or a follow-up edit in plain language.
-  The connected CLI uses its native image-generation tool and returns a saved
-  image for inline display. Click the image for a large Quick Look preview, use
-  **Full Screen** or **Open in Preview**, and press Escape or Space to close it.
-  This requires native image generation to be available in that CLI session;
-  herdrorb does not add a separate API key or silently use a paid fallback.
-- Return sends; Shift-Return inserts a newline. Drafts and reading positions are
-  retained per session.
-- In Codex and Claude Code conversations, the composer has permissions, model, reasoning-effort,
-  and a lightning-bolt toggle for Fast mode. Choices come from the connected CLI and become
-  active only after the CLI confirms them. The detected agent gets its own models and permission modes. Change settings while it is idle;
-  unsupported or unfamiliar menus can still be handled in Terminal.
-- Ultra is a Codex reasoning effort, separate from Fast speed. Claude uses its own
-  effort levels and permission modes; bypass permissions must be enabled when the
-  Claude session starts. Fast is unavailable when the CLI reports account or
-  organization restrictions. Model choices apply to the current session.
-- Click the microphone to dictate into your draft, then stop and review before
-  sending. macOS requests Microphone and Speech Recognition permission the first
-  time. Dictation stops when you close the panel or switch conversations.
-- Type `/` to use the installed agent's command menu in **Terminal**. Use that
-  view for approvals, interactive menus, and sign-in.
-- Click a device name to open its overview; the chevron separately expands its sessions.
-  The paired dots show Herdr (left) and Tailscale (right), with details on hover.
-  Tailscale presence is read from this Mac every 30 seconds while the panel is open,
-  independently of Herdr. Unknown hosts are not treated as offline.
-- **New agent** on the device overview opens the Codex/Claude Code chooser. Select
-  a project folder; the agent starts in that folder on the selected device.
-- **Start a new terminal session** opens an embedded shell beneath that device in
-  the sidebar. Remote shells use your saved SSH host and normal authentication,
-  without requiring Herdr. SSH uses Tailscale when the host is configured for it.
-  The target must be awake and accept SSH.
-- **Start a new Herdr session** opens Herdr in an embedded terminal. Both kinds
-  stay running as you switch devices, open conversations, or hide the panel.
-  Close a terminal session explicitly to end its shell; quitting the app closes
-  these direct terminals. They are separate from Codex and Claude conversations.
-- A device's gear opens connection diagnostics, a custom Herdr path, an agent
-  executable check, and project-folder settings.
-- If agent startup fails, open its existing terminal to inspect the problem,
-  then explicitly retry in that terminal.
-- **Delete session** closes the actual terminal and running command; it asks
-  for confirmation. Quitting the app only detaches its own clients.
+- **Return** sends; **Shift-Return** inserts a newline. Drafts and reading positions stay with each session.
+- Click a **device name** for its overview; click its **chevron** to expand sessions. The paired dots show Herdr on the left and Tailscale on the right. Tailscale presence refreshes every 30 seconds while the panel is open; unknown hosts are not treated as offline.
+- Change model and permission settings while the agent is idle. Available choices come from its CLI. Codex Ultra is a reasoning effort, separate from Fast speed; Claude has its own effort levels and permission modes. Claude bypass permissions must be enabled when the session starts. Account or organization restrictions can make Fast unavailable.
+- Click the **microphone** to dictate, stop, and review before sending. macOS requests Microphone and Speech Recognition permission on first use. Dictation stops when the panel closes or you switch conversations.
+- Type **/** to use slash commands in Terminal. Use Terminal for approvals and unfamiliar interactive menus.
+- Click a saved image for a large preview, **Full Screen**, or **Open in Preview**; Escape or Space closes the preview. Native image generation must be available in the connected Codex CLI; herdrorb adds no separate API key or paid fallback.
+- Open a device’s **gear** for diagnostics, a custom Herdr path, agent executable checks, and project defaults. If agent startup fails, inspect its existing terminal before explicitly retrying.
+- **Delete session** asks for confirmation before closing the actual terminal and command. Close direct terminal sessions explicitly to end their shells.
 
-## Privacy and limitations
+</details>
 
-Conversation view reconstructs terminal output. It is not a guaranteed complete
-structured agent history, and it doesn't reproduce Codex desktop's edit/Undo
-cards. Terminal is the authoritative interactive view. Approvals stay with the
-underlying agents; uncertain prompt sends are never automatically retried.
+## Your data and your sessions
 
-Connected Codex and Claude sessions read complete messages from their saved provider
-transcripts. **Connect history** links an existing session; Claude also connects its
-context telemetry while preserving your existing status line. New sessions prepare
-this integration before launch. The upper-right context meter uses provider data
-and shows an unavailable state when there is no valid reading.
+herdrorb has **no analytics uploader or account service**. Agent CLIs and Herdr
+have their own network behavior. Conversation text and drafts save locally by
+default, with private file permissions and bounded retention, without
+application-level encryption. Automatic image loading, including over SSH, and
+local conversation saving can be controlled in Settings.
 
-Long conversations show a 40-message page. **Earlier messages** reads a previous
-page from the local archive; **Back to latest** returns to current replies. Search
-includes archived messages outside that page. Large replies have an **Open complete
-message** action with search and copying, so a giant reply does not stall the chat.
-Terminal-only sessions remain available as an explicitly approximate fallback.
-See [conversation reliability](docs/CONVERSATION-RELIABILITY.md) for setup and limits.
+Connected sessions read complete messages from saved provider transcripts.
+**Connect history** links an existing session; Claude also connects context
+telemetry while preserving your existing status line. The context meter uses
+provider data and shows an unavailable state when no valid reading exists.
+Long conversations use 40-message pages, with search across the archive.
 
-Conversation text and drafts are saved locally by default, with private file
-permissions and bounded retention, without application-level encryption.
-Image paths printed by agents can load automatically, including over SSH.
-Both behaviors have settings. Read [Privacy and uninstall](docs/PRIVACY.md).
+Terminal-only conversation reconstruction is approximate. The live terminal
+remains the authoritative interactive view, and herdrorb does not reproduce
+Codex desktop’s edit/Undo cards. Uncertain prompt sends are never automatically
+retried. Copied diagnostics omit names, paths, SSH targets, conversation text,
+and raw error messages.
 
-herdrorb has no analytics uploader or account service. Agent CLIs and Herdr
-have their own network behavior. Diagnostics copied from Settings omit names,
-paths, SSH targets, conversation text, and raw error messages.
+Read [conversation reliability](docs/CONVERSATION-RELIABILITY.md) and
+[privacy and uninstall](docs/PRIVACY.md) for details.
 
 ## Contribute and get help
 
@@ -155,14 +162,18 @@ swift test
 sh scripts/check.sh
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), the [architecture](docs/ARCHITECTURE.md),
-[troubleshooting](docs/TROUBLESHOOTING.md), [roadmap](ROADMAP.md), and
-[changelog](CHANGELOG.md). Report ordinary bugs through
-[Issues](https://github.com/andrewjedi/herdrorb/issues); report vulnerabilities
-privately as described in [SECURITY.md](SECURITY.md).
+[Contributing](CONTRIBUTING.md) · [Architecture](docs/ARCHITECTURE.md) ·
+[Troubleshooting](docs/TROUBLESHOOTING.md) · [Roadmap](ROADMAP.md) ·
+[Changelog](CHANGELOG.md)
 
-## License
+Report bugs through [Issues](https://github.com/andrewjedi/herdrorb/issues).
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+## License and affiliation
 
 [MIT](LICENSE), copyright © 2026 Andrew Thompson. Bundled dependency notices
 are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Herdr remains a
 separately installed project under its own license.
+
+Independent community project. Not affiliated with or endorsed by Herdr,
+OpenAI, or Anthropic.
