@@ -20,6 +20,7 @@ struct EmbeddedTerminal: NSViewRepresentable {
         view.ready = onReady
         view.setAccessibilityLabel("\(agent.kind) interactive terminal")
         context.coordinator.onExit = onExit
+        view.linkHighlightMode = .hover
         view.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         view.processDelegate = context.coordinator
         let args = ["terminal", "attach", agent.terminal_id]
@@ -72,6 +73,19 @@ final class InteractiveTerminalView: LocalProcessTerminalView {
             NSApp.activate(ignoringOtherApps: true)
             window.makeFirstResponder(self)
         }
+    }
+    override func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+        // A CLI may hard-wrap a long OAuth URL; implicit terminal link detection
+        // then sees only its first line. Reconstruct the latest complete URL.
+        if link.hasPrefix("https://claude.ai/oauth/authorize?") {
+            let text = String(decoding: getTerminal().getBufferAsData(), as: UTF8.self)
+            if let url = TerminalSetupScreen.parse(String(text.suffix(64_000)))?.link,
+               url.absoluteString.hasPrefix(link) {
+                NSWorkspace.shared.open(url)
+                return
+            }
+        }
+        super.requestOpenLink(source: source, link: link, params: params)
     }
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
         if receivingOutput { super.send(source: source, data: data); return }

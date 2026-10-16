@@ -48,19 +48,20 @@ struct OrbArtwork: View {
 }
 
 struct FloatingOrb: View {
+    var scale: CGFloat = 1
     @ObservedObject var model: BubbleModel
     var hovered = false
     @AppStorage("orbStyle") private var style = OrbStyle.nebula.rawValue
     @AppStorage("orbStatusDot") private var showStatus = false
     var body: some View {
         GeometryReader { geometry in
-            let padding = max(0, (min(geometry.size.width, geometry.size.height) - 112) / 2)
+            let padding = max(0, (min(geometry.size.width, geometry.size.height) - 112 * scale) / 2)
             OrbArtwork(style: OrbStyle(rawValue: style) ?? .nebula, hovered: hovered, glowPadding: padding)
             .overlay(alignment: .bottomTrailing) {
                 if showStatus {
-                    Circle().fill(statusColor).frame(width: 12, height: 12)
-                        .overlay(Circle().stroke(Color(red: 0.06, green: 0.07, blue: 0.10), lineWidth: 2))
-                        .padding(24 + padding).accessibilityLabel(statusLabel)
+                    Circle().fill(statusColor).frame(width: 12 * scale, height: 12 * scale)
+                        .overlay(Circle().stroke(Color(red: 0.06, green: 0.07, blue: 0.10), lineWidth: 2 * scale))
+                        .padding(24 * scale + padding).accessibilityLabel(statusLabel)
                 }
             }
             .help(statusLabel + " · Click to open agents · drag to move")

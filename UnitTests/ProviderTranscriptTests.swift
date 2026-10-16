@@ -37,6 +37,15 @@ final class ProviderTranscriptTests: XCTestCase {
         XCTAssertEqual(result.messages.map { $0.1.text }, ["Hello", "Answer"])
         XCTAssertEqual(result.messages.map { $0.1.fromUser }, [true, false])
     }
+    func testClaudeLocalSettingsAndInternalNotesDoNotBecomeChatMessages() throws {
+        var data = try record(["type": "user", "sessionId": sid, "uuid": "user", "message": ["content": "hello"]])
+        for (index, content) in ["<command-name>/model</command-name>", "<local-command-stdout>Set model</local-command-stdout>", "<local-command-caveat>Internal note</local-command-caveat>"].enumerated() {
+            data += try record(["type": "user", "sessionId": sid, "uuid": "local-\(index)", "message": ["content": content]])
+        }
+        data += try record(["type": "user", "sessionId": sid, "uuid": "meta", "isMeta": true, "message": ["content": "internal context"]])
+        let result = try ProviderTranscriptDecoder.decode(chunk(data), reference: .init(agent: "claude", kind: "id", value: sid), previous: TranscriptCursor())
+        XCTAssertEqual(result.messages.map { $0.1.text }, ["hello"])
+    }
     func testPartialUTF8RecordDoesNotAdvanceCheckpoint() throws {
         let first = try record(["type": "session_meta", "payload": ["id": sid]])
         let next = try codex(["type": "message", "role": "assistant", "content": [["type": "output_text", "text": "café 🌎"]]], ordinal: 1)

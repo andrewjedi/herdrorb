@@ -90,6 +90,10 @@ struct PanelView: View {
     @State private var kind = "codex"
     @State private var directory = ""
     @FocusState private var focusedDeviceSettings: String?
+    @StateObject private var deviceInformation = DeviceInformationStore()
+    @StateObject private var deviceConnections = DeviceConnections()
+    @StateObject private var terminals = DeviceTerminalStore.shared
+    @State private var closingTerminal: DeviceTerminalSession?
     @State private var hoveredMachine: String?
     @State private var hoveredSession: String?
     @State private var renaming: Agent?
@@ -99,13 +103,14 @@ struct PanelView: View {
     @State private var showingGeneralSettings = false
     @State private var deletingSession: Agent?
     @State private var checkingFolder = false
-    var displayedMachineID: String { model.selected?.machineID ?? model.selectedMachineID }
+    var displayedMachineID: String { terminals.selected?.machine.id ?? model.selected?.machineID ?? model.selectedMachineID }
     var machinesWithSessions: Set<String> { Set(model.activeSessions.map(\.machineID)) }
     var machineName: String { model.machines.first { $0.id == displayedMachineID }?.label ?? "Your devices" }
     private var isCreating: Bool { creating || preview == .newSession || preview == .recovery }
     private var hasFailedLaunch: Bool { model.failedLaunches[machineID] != nil }
     private var isSettings: Bool { showingGeneralSettings || preview == .settings || preview == .privacy }
     private func beginSession(on id: String) {
+        terminals.selectedID = nil
         machineID = id
         directory = model.isDemo ? "~/Projects/herdrorb" : model.machines.first(where: { $0.id == id }).map { model.projectFolder(for: $0) } ?? ""
         showingGeneralSettings = false
@@ -127,6 +132,7 @@ struct PanelView: View {
                 if model.showingSetup { ConnectionSetup(model: model) }
                 else if isSettings { GeneralSettings(model: model, showPrivacyFirst: preview == .privacy) }
                 else if isCreating { newSession }
+                else if let terminal = terminals.selected { DeviceTerminalPane(session: terminal, demo: model.isDemo, close: { closingTerminal = terminal }) }
                 else if let agent = model.selected { conversation(agent) }
                 else { emptyState }
                 if let notice = model.notice {
@@ -156,13 +162,28 @@ struct PanelView: View {
             for id in old.symmetricDifference(new) { expansionOverrides.removeValue(forKey: id) }
         }
         .onChange(of: model.selected?.id) { _, _ in
-            if let agent = model.selected, !agent.isShell { expansionOverrides[agent.machineID] = true }
+            if let agent = model.selected, !agent.isShell { terminals.selectedID = nil; expansionOverrides[agent.machineID] = true }
             if model.launching && model.selected != nil { creating = false }
         }
         .onChange(of: machineID) { _, id in
             if isCreating { directory = model.isDemo ? "~/Projects/herdrorb" : model.machines.first(where: { $0.id == id }).map { model.projectFolder(for: $0) } ?? "" }
         }
+        .task(id: model.machines) {
+            repeat {
+                await deviceConnections.refresh(model.machines, demo: model.isDemo)
+                do { try await Task.sleep(for: .seconds(30)) } catch { return }
+            } while !Task.isCancelled
+        }
         .onAppear { if preview != nil { directory = "~/Projects/herdrorb" } }
+        .alert("Close terminal session?", isPresented: Binding(get: { closingTerminal != nil }, set: { if !$0 { closingTerminal = nil } })) {
+            Button("Cancel", role: .cancel) { closingTerminal = nil }
+            Button("Close session", role: .destructive) {
+                if let session = closingTerminal { terminals.close(session) }
+                closingTerminal = nil
+            }
+        } message: {
+            Text("This ends the shell or Herdr client in this terminal. Commands running in the shell may stop.")
+        }
         .sheet(item: $settingsMachine) { machine in DeviceConnectionSettings(model: model, machine: machine) }
         .sheet(isPresented: $showingRename) {
             SessionRenameSheet(name: $renamedSession, cancel: { showingRename = false; renaming = nil }) {
@@ -193,7 +214,7 @@ struct PanelView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("Your devices").font(.system(size: 17, weight: .semibold))
                 Spacer(minLength: 4)
-                Text("\(model.connection.values.filter { $0 == .online }.count) connected")
+                Text("\(model.connection.values.filter { $0 == .online }.count) Herdr")
                     .font(.system(size: 11)).foregroundStyle(OrbTheme.secondary)
             }.padding(.top, 22)
             OrbRule().padding(.top, 15).padding(.bottom, 9)
@@ -203,7 +224,7 @@ struct PanelView: View {
             Spacer(minLength: 14)
             HStack(spacing: 10) {
                 Button { beginSession(on: displayedMachineID) } label: {
-                    Label("New session", systemImage: "plus").font(.system(size: 12)).fixedSize()
+                    Label("New agent", systemImage: "plus").font(.system(size: 12)).fixedSize()
                 }.buttonStyle(OrbButtonStyle(kind: isCreating ? .selected : .secondary, compact: true))
                     .disabled(model.showingSetup || !model.connection.values.contains(.online))
                 Spacer(minLength: 0)
@@ -218,26 +239,25 @@ struct PanelView: View {
     func machineRow(_ machine: Machine) -> some View {
         let selected = (isCreating ? machineID : displayedMachineID) == machine.id
         let sessions = model.activeSessions.filter { $0.machineID == machine.id }
-        let expanded = expansionOverrides[machine.id] ?? !sessions.isEmpty
+        let expanded = expansionOverrides[machine.id] ?? (!sessions.isEmpty || terminals.sessions.contains { $0.machine.identity == machine.identity })
         let attention = sessions.filter { $0.agent_status == "blocked" || model.state($0).unread }.count
         let online = model.connection[machine.id] == .online
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 3) {
                 Button {
                     machineID = machine.id
-                    if sessions.isEmpty { creating = false; model.showMachine(machine.id) }
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { expansionOverrides[machine.id] = !expanded }
+                    creating = false; showingGeneralSettings = false; terminals.selectedID = nil; model.showMachine(machine.id)
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: machine.id == "local" ? "laptopcomputer" : "desktopcomputer").font(.system(size: 15, weight: .regular)).frame(width: 18)
-                        Circle().fill(online ? OrbTheme.online : OrbTheme.warning).frame(width: 7, height: 7).accessibilityHidden(true)
+                        DeviceConnectionDots(herdr: model.connection[machine.id] ?? .connecting, tailscale: deviceConnections.presence[machine.identity] ?? .checking)
                         Text(machine.label).font(.system(size: 14)).lineLimit(1)
                         Spacer(minLength: 0)
                         if attention > 0 { Text("\(attention)").font(.system(size: 11, weight: .semibold)).foregroundStyle(OrbTheme.warning) }
                     }.frame(height: 35).contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityLabel(machine.label)
                     .accessibilityValue("\(online ? "Online" : "Unavailable"), \(expanded ? "Expanded" : "Collapsed")")
-                    .help(expanded ? "Collapse sessions" : "Expand sessions")
+
                 Button { settingsMachine = machine } label: {
                     Image(systemName: "gearshape").font(.system(size: 12)).foregroundStyle(OrbTheme.secondary).frame(width: 24, height: 30)
                 }.buttonStyle(.plain).focused($focusedDeviceSettings, equals: machine.id)
@@ -250,11 +270,28 @@ struct PanelView: View {
                         .rotationEffect(.degrees(expanded ? 90 : 0)).frame(width: 18, height: 30)
                 }.buttonStyle(.plain).accessibilityLabel(expanded ? "Collapse \(machine.label)" : "Expand \(machine.label)")
             }.padding(.horizontal, 3)
-                .background((sessions.isEmpty && selected && !isSettings && !isCreating) ? OrbTheme.selection : hoveredMachine == machine.id ? OrbTheme.raised.opacity(0.65) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                .background((model.selected == nil && terminals.selectedID == nil && selected && !isSettings && !isCreating) ? OrbTheme.selection : hoveredMachine == machine.id ? OrbTheme.raised.opacity(0.65) : .clear, in: RoundedRectangle(cornerRadius: 8))
                 .onHover { hoveredMachine = $0 ? machine.id : nil }
+                .modifier(DeviceHoverDetails(model: model, information: deviceInformation, machine: machine, tailscale: deviceConnections.presence[machine.identity] ?? .checking))
             if expanded {
+                ForEach(terminals.sessions.filter { $0.machine.identity == machine.identity }) { terminal in
+                    Button {
+                        creating = false; showingGeneralSettings = false
+                        model.showMachine(machine.id); terminals.selectedID = terminal.id
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "terminal").foregroundStyle(OrbTheme.accent)
+                            Text(terminal.title).font(.system(size: 14))
+                            Spacer(minLength: 0)
+                        }.padding(.horizontal, 9).frame(height: 34)
+                            .background(terminals.selectedID == terminal.id && !isSettings && !isCreating ? OrbTheme.selection : .clear, in: RoundedRectangle(cornerRadius: 9))
+                            .contentShape(Rectangle())
+                    }.buttonStyle(.plain).contextMenu {
+                        Button("Close session…", role: .destructive) { closingTerminal = terminal }
+                    }
+                }
                 ForEach(sessions) { agent in
-                    Button { showingGeneralSettings = false; creating = false; Task { await model.choose(agent) } } label: {
+                    Button { terminals.selectedID = nil; showingGeneralSettings = false; creating = false; Task { await model.choose(agent) } } label: {
                         HStack(spacing: 10) {
                             Circle().fill(agent.agent_status == "working" ? OrbTheme.online : agent.agent_status == "blocked" ? OrbTheme.warning : OrbTheme.online.opacity(0.8))
                                 .frame(width: 6, height: 6).accessibilityHidden(true)
@@ -276,13 +313,13 @@ struct PanelView: View {
                         }
                         .onHover { hoveredSession = $0 ? agent.id : nil }
                 }
-                if sessions.isEmpty && !online { Text("Machine unavailable").font(OrbTheme.smallFont).foregroundStyle(OrbTheme.secondary) }
+                if sessions.isEmpty && !online { Text("Herdr unavailable").font(OrbTheme.smallFont).foregroundStyle(OrbTheme.secondary) }
             }
         }
     }
     var header: some View {
         HStack(spacing: 16) {
-            Text(isCreating ? "New session" : machineName).font(.system(size: 18, weight: .semibold)).lineLimit(1)
+            Text(isCreating ? "New agent" : machineName).font(.system(size: 18, weight: .semibold)).lineLimit(1)
             if let agent = model.selected, !isCreating && !model.showingSetup {
                 HStack(spacing: 6) {
                     ProviderLogo(provider: agent.agent).frame(width: 14, height: 14)
@@ -290,7 +327,7 @@ struct PanelView: View {
                 }
             }
             if !isCreating && !model.showingSetup {
-                OrbStatus(text: (model.connection[displayedMachineID] ?? .connecting).rawValue,
+                OrbStatus(text: "Herdr: " + (model.connection[displayedMachineID] ?? .connecting).rawValue.replacingOccurrences(of: "Herdr ", with: ""),
                     color: model.connection[displayedMachineID] == .online ? OrbTheme.online : OrbTheme.warning)
             }
             Spacer(minLength: 0)
@@ -301,21 +338,19 @@ struct PanelView: View {
     }
 
     var emptyState: some View {
-        VStack(spacing: 15) {
-            Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 46, weight: .ultraLight)).foregroundStyle(OrbTheme.secondary).padding(.bottom, 5)
-            Text("Start a conversation on \(machineName). ").font(.system(size: 19, weight: .semibold)).multilineTextAlignment(.center)
-            Text("Choose an agent and a project to begin.").font(.system(size: 15)).foregroundStyle(OrbTheme.secondary)
-            Button { beginSession(on: displayedMachineID) } label: { Label("New session", systemImage: "plus") }
-                .buttonStyle(OrbButtonStyle(kind: .primary)).disabled(model.connection[displayedMachineID] != .online || model.launching)
+        Group {
             if let machine = model.machines.first(where: { $0.id == displayedMachineID }) {
-                LaunchRecovery(model: model, machine: machine)
-                if model.connection[machine.id] != .online, let detail = model.connectionDetails[machine.id] {
-                    Text(detail).font(.callout).foregroundStyle(OrbTheme.warning)
-                    Button("Connection settings…") { settingsMachine = machine }.buttonStyle(OrbButtonStyle())
-                }
+                DeviceOverview(model: model, machine: machine,
+                    tailscale: deviceConnections.presence[machine.identity] ?? .checking,
+                    newAgent: { beginSession(on: machine.id) },
+                    openTerminal: { startsHerdr in
+                        creating = false; showingGeneralSettings = false
+                        model.showMachine(machine.id)
+                        terminals.create(machine: machine, startsHerdr: startsHerdr)
+                        expansionOverrides[machine.id] = true
+                    }, settings: { settingsMachine = machine })
             }
-        }.padding(.bottom, model.failedLaunches[displayedMachineID] == nil && model.connection[displayedMachineID] == .online ? 64 : 0)
-            .padding(32).frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
     var newSession: some View {
         VStack(spacing: 0) {
@@ -391,16 +426,17 @@ struct PanelView: View {
                         return
                     }
                     let chosenDirectory = directory
+                    let chosenKind = kind
                     checkingFolder = true
                     Task {
                         do {
                             let path = try await ProjectFolders.list(on: machine, path: chosenDirectory).path
-                            await model.launch(kind: kind, machine: machine, directory: path)
+                            await model.launch(kind: chosenKind, machine: machine, directory: path)
                             if model.selected != nil { creating = false }
                         } catch { model.globalNotice = error.localizedDescription }
                         checkingFolder = false
                     }
-                } label: { Text(checkingFolder ? "Checking folder…" : model.launching ? "Starting…" : "Start session").frame(minWidth: 106) }
+                } label: { Text(checkingFolder ? "Checking folder…" : model.launching ? "Starting…" : "Start agent").frame(minWidth: 106) }
                     .buttonStyle(OrbButtonStyle(kind: .primary)).disabled(hasFailedLaunch || model.launching || checkingFolder || model.connection[machineID] != .online || model.checkingAgents.contains(machineID) || model.availability[machineID]?.contains(kind) == false)
             }.padding(.horizontal, 24).padding(.top, 15).padding(.bottom, 14)
         }.disabled(model.launching || checkingFolder)

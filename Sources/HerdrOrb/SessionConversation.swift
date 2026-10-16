@@ -7,6 +7,8 @@ struct SessionConversation: View {
     let machine: Machine
     @ObservedObject var session: SessionState
     @AppStorage("automaticallyScrollToNewMessages") private var automaticallyScroll = true
+    @State private var loginCode = ""
+    @State private var showingAccountHelp = false
     @State private var find = ""
     @State private var searching = false
     @State private var confirmingDelete = false
@@ -29,7 +31,7 @@ struct SessionConversation: View {
                 .background(OrbTheme.surface, in: RoundedRectangle(cornerRadius: 9))
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(OrbTheme.line, lineWidth: 0.8))
                 Spacer(minLength: 0)
-                if !agent.isShell && !session.terminal {
+                if !agent.isShell && !session.terminal && session.terminalSetup == nil {
                     ContextUsageIndicator(provider: agent.kind, usage: session.cached || session.settingsBusy ? nil : session.contextUsage, connect: { Task { await model.connectHistory(agent) } })
                 }
                 if session.terminal && !session.terminalConnected {
@@ -47,6 +49,25 @@ struct SessionConversation: View {
                         Image(systemName: "magnifyingglass").frame(width: 24, height: 24)
                             .background(searching ? Color.white.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 6))
                     }.help("Find in conversation").accessibilityLabel("Find in conversation")
+                }
+                if agent.agent == "claude" {
+                    Button { showingAccountHelp = true } label: {
+                        Image(systemName: "person.crop.circle").frame(width: 24, height: 24)
+                    }.help("Claude account and sign out").accessibilityLabel("Claude account and sign out")
+                    .popover(isPresented: $showingAccountHelp) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Claude account on \(machine.label)").font(.headline)
+                            Text("In Claude Code, run /logout to sign out, then /login to choose another account. This affects Claude Code on this device.").fixedSize(horizontal: false, vertical: true)
+                            HStack {
+                                Button("Sign out") { showingAccountHelp = false; Task { await model.claudeAccount(agent, signOut: true) } }
+                                Button("Switch account") { showingAccountHelp = false; Task { await model.claudeAccount(agent, signOut: false) } }
+                            }.buttonStyle(OrbButtonStyle()).disabled(session.busy || session.settingsBusy || agent.agent_status == "working" || !model.canInteract(agent))
+                            Button("Open account controls in Terminal") {
+                                showingAccountHelp = false
+                                model.respondInTerminal(agent)
+                            }.buttonStyle(OrbButtonStyle(kind: .primary))
+                        }.padding(18).frame(width: 310)
+                    }
                 }
                 Button(role: .destructive) { confirmingDelete = true } label: {
                     Image(systemName: "trash").frame(width: 24, height: 24)
@@ -75,6 +96,8 @@ struct SessionConversation: View {
                     Text("↑ ↓ Navigate  ·  Return Select  ·  Esc Dismiss")
                         .font(.system(size: 12)).foregroundStyle(OrbTheme.secondary).padding(.vertical, 6)
                 }
+            } else if agent.agent == "claude", let setup = session.terminalSetup {
+                setupView(setup)
             } else {
                 if searching {
                 HStack {
@@ -138,6 +161,66 @@ struct SessionConversation: View {
                 searchBusy = false
             }
             .onDisappear { model.persist(agent) }
+    }
+    private func setupView(_ setup: TerminalSetupScreen) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text(setup.continueMessage == nil ? "Set up Claude Code" : "Continue Claude Code setup").font(.title2.weight(.semibold))
+                Text("Complete the setup on \(machine.label). These controls go directly to its terminal.")
+                    .foregroundStyle(OrbTheme.secondary)
+                if let link = setup.link {
+                    HStack {
+                        Link("Sign in to Claude", destination: link).buttonStyle(OrbButtonStyle(kind: .primary))
+                        Button("Copy login link") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(link.absoluteString, forType: .string)
+                        }.buttonStyle(OrbButtonStyle())
+                    }
+                    Text("Open the link, then paste the authorization code below if prompted.")
+                        .foregroundStyle(OrbTheme.secondary)
+                }
+                if !setup.options.isEmpty {
+                    Text("Choose an option, then press Enter or click Confirm.").foregroundStyle(OrbTheme.secondary)
+                }
+                if setup.continueMessage == nil, let details = setup.continueDetails {
+                    Text(details).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(setup.options, id: \.self) { option in
+                    Button((setup.selectedOption?.contains(option) == true ? "✓ " : "") + option) { Task { await model.setupInput(agent, option: option) } }
+                        .buttonStyle(OrbButtonStyle())
+                }
+                if let message = setup.continueMessage {
+                    if let details = setup.continueDetails {
+                        Text(details).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(message).foregroundStyle(OrbTheme.text)
+                    Button("Continue") { Task { await model.setupInput(agent, key: "enter") } }
+                        .buttonStyle(OrbButtonStyle(kind: .primary))
+                        .keyboardShortcut(.defaultAction)
+                } else {
+                HStack {
+                    Button("↑ Up") { Task { await model.setupInput(agent, key: "up") } }.keyboardShortcut(.upArrow, modifiers: [])
+                    Button("↓ Down") { Task { await model.setupInput(agent, key: "down") } }.keyboardShortcut(.downArrow, modifiers: [])
+                    if !setup.waitingForCode {
+                        Button("Confirm") { Task { await model.setupInput(agent, key: "enter") } }.keyboardShortcut(.defaultAction)
+                    }
+                    Button("Cancel") { Task { await model.setupInput(agent, key: "escape") } }.keyboardShortcut(.cancelAction)
+                }.buttonStyle(OrbButtonStyle())
+                }
+                if setup.waitingForCode {
+                    SecureField("Paste authorization code", text: $loginCode)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Submit code") {
+                        let code = loginCode
+                        loginCode = ""
+                        Task { await model.setupInput(agent, code: code) }
+                    }.buttonStyle(OrbButtonStyle(kind: .primary)).disabled(loginCode.isEmpty)
+                }
+                Button("Open full Terminal") { model.respondInTerminal(agent) }
+                    .buttonStyle(OrbButtonStyle())
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
+                .disabled(session.busy || session.settingsBusy || !model.canInteract(agent) || session.cached)
+        }.onDisappear { loginCode = "" }
     }
     private func entry(_ id: String, message: SessionMessage? = nil, state: String = "", @ViewBuilder content: @escaping () -> some View) -> ConversationRowEntry {
         ConversationRowEntry(id: id, message: message, state: state) {

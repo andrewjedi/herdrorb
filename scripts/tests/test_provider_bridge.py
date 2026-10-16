@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch, MagicMock
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'Sources/HerdrOrb/Resources/provider_bridge.py'
 
@@ -69,6 +70,18 @@ class BridgeTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(SCRIPT), 'serve'], env=self.env, input=requests, text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0)
         self.assertEqual([json.loads(line) for line in result.stdout.splitlines()], [{'result': {}}]*3)
+    def test_session_reporting_uses_herdr_native_source(self):
+        spec = importlib.util.spec_from_file_location('provider_bridge', SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        client = MagicMock()
+        with patch.dict(os.environ, {'HERDR_PANE_ID': 'w1:p1', 'HERDR_SOCKET_PATH': '/fixture.sock'}), patch.object(module.socket, 'socket') as sock:
+            sock.return_value.__enter__.return_value = client
+            module.report_session({'session_id': 'abcdef12-3456-7890-abcd-ef1234567890'})
+        request = json.loads(client.sendall.call_args.args[0])
+        self.assertEqual(request['method'], 'pane.report_agent_session')
+        self.assertEqual(request['params']['source'], 'herdr:claude')
+        self.assertEqual(request['params']['pane_id'], 'w1:p1')
     def test_invalid_json_settings_are_not_replaced(self):
         settings = self.project / '.claude'
         settings.mkdir()

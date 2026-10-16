@@ -8,12 +8,14 @@ enum OrbWindowLevels {
 }
 
 /// Geometry is in desktop points; mirroring preserves the attachment on either side.
-struct OrbPanelGeometry {
+struct OrbPanelGeometry: Equatable {
     var orb: CGRect
     var panel: CGRect
+    var compact = false
+    var orbScale: CGFloat { min(1, orb.width / 152) }
     // Includes the glass rim at maximum hover expansion; the halo remains translucent.
     var orbOcclusionRect: CGRect {
-        CGRect(x: orb.midX - 48, y: orb.midY - 48, width: 96, height: 96)
+        CGRect(x: orb.midX - 48 * orbScale, y: orb.midY - 48 * orbScale, width: 96 * orbScale, height: 96 * orbScale)
     }
     func effectMask(in bounds: CGRect) -> CGPath {
         let path = CGMutablePath()
@@ -23,11 +25,11 @@ struct OrbPanelGeometry {
     }
     var panelOnRight: Bool { panel.midX > orb.midX }
     var canConnect: Bool {
-        panelOnRight ? panel.minX > orb.midX + 30 : panel.maxX < orb.midX - 30
+        panelOnRight ? panel.minX > orb.midX + 30 * orbScale : panel.maxX < orb.midX - 30 * orbScale
     }
     func frame(at progress: CGFloat, spring: Bool = false) -> CGRect {
         let p = min(spring ? 1.035 : 1, max(0, progress))
-        let seed = CGRect(x: orb.midX - 12, y: orb.midY - 18, width: 24, height: 36)
+        let seed = CGRect(x: orb.midX - 12 * orbScale, y: orb.midY - 18 * orbScale, width: 24 * orbScale, height: 36 * orbScale)
         return CGRect(x: seed.minX + (panel.minX - seed.minX) * p,
                       y: seed.minY + (panel.minY - seed.minY) * p,
                       width: seed.width + (panel.width - seed.width) * p,
@@ -70,12 +72,15 @@ struct PanelSpring {
     private(set) var lastPreparationMilliseconds = 0.0
     private var accessibilityObserver: NSObjectProtocol?
 
-    init() {
+    private let compact: Bool
+
+    init(compact: Bool = false) {
+        self.compact = compact
         window = NSWindow(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.isOpaque = false; window.backgroundColor = .clear
         window.hasShadow = false; window.ignoresMouseEvents = true
         window.isReleasedWhenClosed = false
-        window.level = OrbWindowLevels.panel
+        window.level = compact ? NSWindow.Level(rawValue: OrbWindowLevels.orb.rawValue + 1) : OrbWindowLevels.panel
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.contentView = art
         art.wantsLayer = true
@@ -91,8 +96,6 @@ struct PanelSpring {
     /// remain valid, including when the live panel is hidden during its opening.
     func move(orb: NSWindow, panel: NSWindow, to origin: NSPoint, connected: Bool) {
         let dx = origin.x - orb.frame.minX, dy = origin.y - orb.frame.minY
-        NSDisableScreenUpdates()
-        defer { NSEnableScreenUpdates() }
         orb.setFrameOrigin(origin)
         if connected && (window.isVisible || panel.isVisible) {
             panel.setFrameOrigin(panel.frame.offsetBy(dx: dx, dy: dy).origin)
@@ -100,15 +103,19 @@ struct PanelSpring {
         }
     }
 
-    func update(orb: CGRect, panel: NSWindow, connected: Bool) {
+    func update(orb: CGRect, panel: NSWindow, connected: Bool, refreshFlow: Bool = true) {
         let desktop = orb.union(panel.frame).insetBy(dx: -48, dy: -48)
+        let geometry = OrbPanelGeometry(orb: orb.offsetBy(dx: -desktop.minX, dy: -desktop.minY), panel: panel.frame.offsetBy(dx: -desktop.minX, dy: -desktop.minY), compact: compact)
+        let attached = connected && geometry.canConnect
+        guard window.frame != desktop || art.geometry != geometry || art.connected != attached else { return }
         window.setFrame(desktop, display: false)
         art.frame = CGRect(origin: .zero, size: desktop.size)
-        art.geometry = OrbPanelGeometry(orb: orb.offsetBy(dx: -desktop.minX, dy: -desktop.minY), panel: panel.frame.offsetBy(dx: -desktop.minX, dy: -desktop.minY))
-        art.connected = connected && art.geometry.canConnect
+        art.geometry = geometry
+        art.connected = attached
         art.updateOrbMask()
         art.needsDisplay = true
-        if !transitioning && art.progress == 1 { art.startFlow() }
+        if !connected && !transitioning { window.orderOut(nil); art.stopFlow(); return }
+        if refreshFlow && !transitioning && art.progress == 1 { art.startFlow() }
     }
     func prepareSnapshot(panel: NSWindow) {
         guard !transitioning, let view = panel.contentView else { return }
@@ -125,9 +132,9 @@ struct PanelSpring {
     }
     func animate(open: Bool, panel: NSWindow, orb: CGRect, connected: Bool, completion: @escaping () -> Void) {
         let now = CACurrentMediaTime()
-        let current = transitioning ? spring.sample(now - startTime) : (position: art.progress, velocity: CGFloat(0))
+        let current = transitioning ? spring.sample((now - startTime) * (compact ? 1.9 : 1.2)) : (position: art.progress, velocity: CGFloat(0))
         completionWork?.cancel(); generation += 1
-        update(orb: orb, panel: panel, connected: connected)
+        update(orb: orb, panel: panel, connected: connected, refreshFlow: false)
         lastCaptureMilliseconds = 0
         if !transitioning && (!open || art.snapshot == nil || art.snapshot?.size != panel.contentView?.bounds.size) {
             prepareSnapshot(panel: panel)
@@ -135,12 +142,12 @@ struct PanelSpring {
         spring = PanelSpring(position: current.position, velocity: current.velocity, target: open ? 1 : 0)
         startTime = CACurrentMediaTime()
         art.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let duration = art.reducedMotion ? 0.12 : (open ? 0.42 : 0.30)
-        let count = max(2, Int(duration * 120))
+        let duration = art.reducedMotion ? 0.12 : (compact ? (open ? 0.22 : 0.16) : (open ? 0.34 : 0.26))
+        let count = max(2, Int(duration * 60))
         let samples: [CGFloat] = (0...count).map { index in
             if index == count { return spring.target }
             let fraction = Double(index) / Double(count)
-            return art.reducedMotion ? current.position + (spring.target - current.position) * CGFloat(fraction) : spring.sample(fraction * duration).position
+            return art.reducedMotion ? current.position + (spring.target - current.position) * CGFloat(fraction) : spring.sample(fraction * duration * (compact ? 1.9 : 1.2)).position
         }
         transitioning = true; art.stopFlow()
         art.installTransition(samples: samples, duration: duration)
@@ -161,9 +168,10 @@ struct PanelSpring {
         lastPreparationMilliseconds = (CACurrentMediaTime() - now) * 1000
     }
     func showConnection(orb: CGRect, panel: NSWindow, connected: Bool) {
-        update(orb: orb, panel: panel, connected: connected)
+        update(orb: orb, panel: panel, connected: connected, refreshFlow: false)
         guard !transitioning else { return }
         art.progress = 1; art.drawSnapshot = false
+        guard connected else { window.orderOut(nil); return }
         window.order(.below, relativeTo: panel.windowNumber)
         art.startFlow()
     }
@@ -197,10 +205,13 @@ final class OrbPanelEffectView: NSView {
     func stopFlow() { idleLayer?.removeFromSuperlayer(); idleLayer = nil }
     func startFlow() {
         stopFlow()
-        guard progress == 1 else { needsDisplay = true; return }
+        guard progress == 1, connected else { needsDisplay = true; return }
         wantsLayer = true
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        let scene = EtherealMembrane.make(geometry: geometry, frames: [geometry.panel], connected: connected, bounds: bounds, flowing: !reducedMotion)
+        let scene = EtherealMembrane.make(geometry: geometry, frames: [geometry.panel], connected: connected, bounds: bounds, flowing: false)
+        // The settled connector is static: cache it instead of continuously compositing folds.
+        scene.shouldRasterize = true
+        scene.rasterizationScale = window?.backingScaleFactor ?? 2
         idleLayer = scene; layer?.addSublayer(scene)
         needsDisplay = true
         CATransaction.commit()

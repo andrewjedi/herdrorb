@@ -36,7 +36,7 @@ notarized release is available; do not disable Gatekeeper system-wide.
 3. Open herdrorb. Setup detects a missing installation, stopped server, or
    unsupported protocol. Use **Locate Herdr…** for a custom executable, or
    **Check again** after installing or starting Herdr.
-4. Choose **Continue**, then select an existing agent or **New session**.
+4. Choose **Continue**, then select an existing agent or **New agent**.
    Agent accounts and sign-in are managed by their CLIs, not by herdrorb.
 
 Press **⌘⇧D** to toggle the panel from any app. Change the shortcut in Settings → Orb → Toggle panel. The borderless panel unfurls from the floating orb with flowing galaxy light; closing draws it back in. Settings also includes a separate switch for its opening and closing sound. Reduce Motion replaces the expansion with a short fade.
@@ -98,6 +98,20 @@ the missing-Herdr setup state without touching your installations.
   time. Dictation stops when you close the panel or switch conversations.
 - Type `/` to use the installed agent's command menu in **Terminal**. Use that
   view for approvals, interactive menus, and sign-in.
+- Click a device name to open its overview; the chevron separately expands its sessions.
+  The paired dots show Herdr (left) and Tailscale (right), with details on hover.
+  Tailscale presence is read from this Mac every 30 seconds while the panel is open,
+  independently of Herdr. Unknown hosts are not treated as offline.
+- **New agent** on the device overview opens the Codex/Claude Code chooser. Select
+  a project folder; the agent starts in that folder on the selected device.
+- **Start a new terminal session** opens an embedded shell beneath that device in
+  the sidebar. Remote shells use your saved SSH host and normal authentication,
+  without requiring Herdr. SSH uses Tailscale when the host is configured for it.
+  The target must be awake and accept SSH.
+- **Start a new Herdr session** opens Herdr in an embedded terminal. Both kinds
+  stay running as you switch devices, open conversations, or hide the panel.
+  Close a terminal session explicitly to end its shell; quitting the app closes
+  these direct terminals. They are separate from Codex and Claude conversations.
 - A device's gear opens connection diagnostics, a custom Herdr path, an agent
   executable check, and project-folder settings.
 - If agent startup fails, open its existing terminal to inspect the problem,

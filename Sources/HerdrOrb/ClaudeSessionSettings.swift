@@ -3,11 +3,13 @@ import Foundation
 /// Claude's protocol is independent of Codex. Only the confirmed values share a view model.
 enum ClaudeSettingsScreen {
     static func prompt(_ text: String) -> String? {
-        let lines = text.components(separatedBy: .newlines)
+        let lines = text.replacingOccurrences(of: "\u{00a0}", with: " ").components(separatedBy: .newlines)
         guard let index = lines.lastIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("❯") }),
               index > 0, lines[index - 1].trimmingCharacters(in: .whitespaces).hasPrefix("────"),
               index + 1 < lines.count, lines[index + 1].trimmingCharacters(in: .whitespaces).hasPrefix("────") else { return nil }
-        return String(lines[index].trimmingCharacters(in: .whitespaces).dropFirst()).trimmingCharacters(in: .whitespaces)
+        let value = String(lines[index].trimmingCharacters(in: .whitespaces).dropFirst()).trimmingCharacters(in: .whitespaces)
+        if value.hasPrefix("Try \"") && value.hasSuffix("\"") { return "" }
+        return value
     }
     static func mode(_ text: String) -> String? {
         guard prompt(text) != nil, let boundary = text.range(of: "❯", options: .backwards) else { return nil }
@@ -15,7 +17,7 @@ enum ClaudeSettingsScreen {
         for (label, id) in [("manual mode on", "manual"), ("accept edits on", "acceptEdits"), ("plan mode on", "plan"), ("auto mode on", "claudeAuto"), ("bypass permissions on", "bypassPermissions"), ("don't ask on", "dontAsk")] {
             if footer.contains(label) { return id }
         }
-        return nil
+        return "manual"
     }
     struct Model: Equatable {
         let label: String
@@ -23,7 +25,7 @@ enum ClaudeSettingsScreen {
         let current: Bool
     }
     static func models(_ text: String) -> [Model] {
-        guard text.contains("Select model"), text.contains("Esc to cancel") else { return [] }
+        guard text.contains("Select model"), (text.contains("Esc to cancel") || text.contains("Esc to exit")) else { return [] }
         let regex = try! NSRegularExpression(pattern: #"^\s*(❯)?\s*\d+\.\s+(.+?)(?:\s*✔|\s{2,}|$)"#)
         return text.components(separatedBy: .newlines).compactMap { line in
             guard let m = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)), let r = Range(m.range(at: 2), in: line) else { return nil }
@@ -31,8 +33,12 @@ enum ClaudeSettingsScreen {
         }
     }
     static func effort(_ text: String) -> (values: [String], selected: String?) {
+        if !models(text).isEmpty, text.contains("←"), text.contains("→"),
+           let range = text.range(of: #"(?i)\b(low|medium|high) effort\b"#, options: .regularExpression) {
+            return (["low", "medium", "high"], text[range].split(separator: " ").first.map { $0.lowercased() })
+        }
         let lines = text.components(separatedBy: .newlines)
-        guard lines.contains(where: { $0.trimmingCharacters(in: .whitespaces) == "Effort" }), text.contains("Esc to cancel"),
+        guard lines.contains(where: { $0.trimmingCharacters(in: .whitespaces) == "Effort" }), (text.contains("Esc to cancel") || text.contains("Esc to exit")),
               let index = lines.firstIndex(where: { $0.contains("low") && $0.contains("medium") && $0.contains("high") }), index > 0 else { return ([], nil) }
         let regex = try! NSRegularExpression(pattern: #"\b(low|medium|high|xhigh|max|ultracode)\b"#)
         let matches = regex.matches(in: lines[index], range: NSRange(lines[index].startIndex..., in: lines[index]))
@@ -43,7 +49,7 @@ enum ClaudeSettingsScreen {
         return (values, nearest.map { values[$0.offset] })
     }
     static func menu(_ text: String) -> Bool {
-        !models(text).isEmpty || !effort(text).values.isEmpty || (text.contains("Fast mode (research preview)") && text.contains("Esc to cancel"))
+        !models(text).isEmpty || !effort(text).values.isEmpty || (text.contains("Fast mode (research preview)") && (text.contains("Esc to cancel") || text.contains("Esc to exit")))
     }
 }
 
@@ -51,6 +57,52 @@ struct ClaudeSettingsBridge {
     let connection: any HerdrConnection
     let paneID: String
     private let owned = ClaudeSettingsOwnership()
+
+    /// Exit only an idle, empty prompt and resume the exact provider conversation.
+    /// Never type a launch command into a pane that may still belong to Claude.
+    func restart(machine: Machine, sessionID: String, bypass: Bool) async throws {
+        guard UUID(uuidString: sessionID) != nil else { throw failure("Connect saved history before restarting Claude.") }
+        func pane() async throws -> Agent {
+            let inventory = try HerdrClient.inventory(await connection.call("session.snapshot"), machine: machine)
+            guard let pane = inventory.first(where: { $0.pane_id == paneID }) else { throw failure("The terminal is no longer available.") }
+            return pane
+        }
+        let original = try await pane()
+        let originalScreen = try await screen()
+        guard original.agent == "claude", !["working", "blocked"].contains(original.agent_status),
+              original.providerSession?.sessionID == sessionID.lowercased(),
+              ClaudeSettingsScreen.prompt(originalScreen) == "" else {
+            throw failure("Wait for Claude to finish and clear its terminal draft before restarting.")
+        }
+        _ = try await connection.call("pane.send_text", ["pane_id": paneID, "text": "/exit"])
+        _ = try await wait { ClaudeSettingsScreen.prompt($0) == "/exit" }
+        try await keys(["enter"])
+        var exited = false
+        for _ in 0..<60 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            if try await pane().isShell { exited = true; break }
+        }
+        guard exited else { throw failure("Claude has not exited. Check Terminal before trying again; your saved chat is preserved.") }
+        let mode = bypass ? "bypassPermissions" : ClaudeSettingsScreen.mode(originalScreen) ?? "manual"
+        let cliMode = mode == "manual" ? "default" : mode == "claudeAuto" ? "auto" : mode
+        var args = ["--resume", sessionID, "--permission-mode", cliMode]
+        if mode == "bypassPermissions" { args.append("--allow-dangerously-skip-permissions") }
+        let parameters: [String: Any] = ["name": HerdrClient.sessionName(kind: "claude"), "kind": "claude", "pane_id": paneID, "args": args, "timeout_ms": 30_000]
+        for attempt in 0..<20 {
+            do {
+                _ = try await connection.call("agent.start", parameters, timeout: 35)
+                return
+            } catch let error as RPCError where error.code == "agent_not_ready" {
+                // The process started and is awaiting a user-owned setup choice.
+                return
+            } catch let error as RPCError where error.code == "agent_pane_busy" && attempt < 19 {
+                // This rejection guarantees no command was sent. Shell process
+                // detection can settle later than the session snapshot.
+                try await Task.sleep(nanoseconds: 250_000_000)
+                guard try await pane().isShell else { throw error }
+            }
+        }
+    }
 
     func refresh() async throws -> SessionComposerSettings {
         do { let result = try await readSettings(); await cleanup(); return result }
@@ -80,8 +132,7 @@ struct ClaudeSettingsBridge {
                     let rows = ClaudeSettingsScreen.models(menu)
                     guard let target = rows.firstIndex(where: { $0.label == value }), let selected = rows.firstIndex(where: \.highlighted) else { throw failure("Claude no longer offers that model.") }
                     if target == selected {
-                        guard menu.contains("s to use this session only") else { throw failure("This Claude version does not offer a session-only model change. Use Terminal to choose its default.") }
-                        try await keys(["s"])
+                        try await keys([menu.contains("s to use this session only") ? "s" : "enter"])
                         _ = try await wait { ClaudeSettingsScreen.prompt($0) == "" }
                         owned.menu = false
                         break
@@ -91,7 +142,7 @@ struct ClaudeSettingsBridge {
                     menu = try await wait { ClaudeSettingsScreen.models($0) != previous }
                 }
             case "effort":
-                var menu = try await open("/effort")
+                var menu = try await openEffort()
                 for _ in 0..<12 {
                     let parsed = ClaudeSettingsScreen.effort(menu)
                     guard let target = parsed.values.firstIndex(of: value), let selected = parsed.selected.flatMap({ parsed.values.firstIndex(of: $0) }) else { throw failure("Claude no longer offers that effort.") }
@@ -120,7 +171,7 @@ struct ClaudeSettingsBridge {
             if key == "access" {
                 confirmed.access = ClaudeSettingsScreen.mode(try await screen())
             } else if key == "effort" {
-                let menu = try await open("/effort")
+                let menu = try await openEffort()
                 let parsed = ClaudeSettingsScreen.effort(menu)
                 confirmed.availableEfforts = parsed.values
                 confirmed.effort = parsed.selected
@@ -137,34 +188,48 @@ struct ClaudeSettingsBridge {
     }
 
     private func readSettings() async throws -> SessionComposerSettings {
-        let initial = try await screen()
+        var initial = try await screen()
+        // Recover a model menu left open by an earlier bridge/version without
+        // applying its highlighted value. The native popover owns this interaction.
+        if ClaudeSettingsScreen.menu(initial) {
+            owned.menu = true
+            try await dismiss()
+            initial = try await screen()
+        }
         guard ClaudeSettingsScreen.prompt(initial) == "" else { throw failure("Finish or clear the existing Terminal input first.") }
         var result = SessionComposerSettings()
         result.access = ClaudeSettingsScreen.mode(initial)
         if let mode = result.access {
-            result.accessOptions = mode == "dontAsk" ? [] : ["manual", "acceptEdits", "plan", "claudeAuto", "bypassPermissions"]
+            result.accessOptions = mode == "dontAsk" ? [] : ["manual", "acceptEdits", "plan"]
+            if ["claudeAuto", "bypassPermissions"].contains(mode) { result.accessOptions.append(mode) }
         }
         let modelMenu = try await open("/model")
         let rows = ClaudeSettingsScreen.models(modelMenu)
         result.models = rows.map(\.label)
         result.model = rows.first(where: \.current)?.label
+        let inlineEffort = ClaudeSettingsScreen.effort(modelMenu)
         try await dismiss()
-        let effortMenu = try await open("/effort")
-        let parsed = ClaudeSettingsScreen.effort(effortMenu)
-        result.availableEfforts = parsed.values
-        result.effort = parsed.selected
-        try await dismiss()
-        let fastMenu = try await open("/fast")
-        try await dismiss()
-        let after = try await screen()
-        let lower = fastMenu.lowercased()
-        let unavailable = ["disabled", "not available", "not eligible", "requires", "not logged in"].contains { lower.contains($0) }
-        let statusLines = after.components(separatedBy: .newlines).filter { $0.contains("⎿") && $0.contains("Fast mode ") }
-        if let status = statusLines.last {
-            result.speed = status.contains("Fast mode ON") ? "fast" : status.contains("Fast mode OFF") ? "standard" : nil
+        if !inlineEffort.values.isEmpty {
+            result.availableEfforts = inlineEffort.values
+            result.effort = inlineEffort.selected
+        } else {
+            // Newer Claude releases have a dedicated effort screen.
+            do {
+                let effortMenu = try await open("/effort")
+                let parsed = ClaudeSettingsScreen.effort(effortMenu)
+                result.availableEfforts = parsed.values
+                result.effort = parsed.selected
+                try await dismiss()
+            } catch is CancellationError { throw CancellationError() }
+            catch { await cleanup() }
         }
-        if result.speed != nil { result.speeds = unavailable ? ["standard"] : ["standard", "fast"] }
         return result
+    }
+    private func openEffort() async throws -> String {
+        let menu = try await open("/model")
+        if !ClaudeSettingsScreen.effort(menu).values.isEmpty { return menu }
+        try await dismiss()
+        return try await open("/effort")
     }
 
     private func open(_ command: String) async throws -> String {

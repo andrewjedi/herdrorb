@@ -24,6 +24,8 @@ struct ComposerControls: View {
     var onSpeed: (String) -> Void
     var onRefresh: (() -> Void)? = nil
 
+    var onRestartClaude: ((Bool) -> Void)? = nil
+
     @State private var showingAccess = false
     @State private var showingSettings = false
 
@@ -60,7 +62,7 @@ struct ComposerControls: View {
             .accessibilityLabel("Permissions: \(accessChoice?.title ?? "not selected")")
             .help("Change permissions")
             .popover(isPresented: $showingAccess, arrowEdge: .top) {
-                ComposerAccessPopover(provider: provider, selection: accessChoice, options: accessOptions, applying: applying) { choice in
+                ComposerAccessPopover(provider: provider, selection: accessChoice, options: accessOptions, applying: applying, onEnableBypass: onRestartClaude.map { restart in { showingAccess = false; restart(true) } }) { choice in
                     onAccess(choice.rawValue)
                     showingAccess = false
                 }
@@ -93,7 +95,7 @@ struct ComposerControls: View {
             .popover(isPresented: $showingSettings, arrowEdge: .top) {
                 ComposerSettingsPopover(provider: provider, model: model, effort: effort, speed: speed,
                                         models: models, efforts: efforts, speeds: speeds, defaultEffort: defaultEffort, applying: applying,
-                                        onModel: onModel, onEffort: onEffort, onSpeed: onSpeed)
+                                        onModel: onModel, onEffort: onEffort, onSpeed: onSpeed, onRestart: onRestartClaude.map { restart in { showingSettings = false; restart(false) } })
             }
             }
         }
@@ -244,6 +246,7 @@ private struct ComposerAccessPopover: View {
     let selection: ComposerAccessChoice?
     let options: [String]
     let applying: Bool
+    var onEnableBypass: (() -> Void)? = nil
     let select: (ComposerAccessChoice) -> Void
 
     var body: some View {
@@ -253,12 +256,15 @@ private struct ComposerAccessPopover: View {
                     .font(.system(size: 13)).foregroundStyle(ComposerPalette.secondary)
                     .padding(.horizontal, 12).padding(.top, 9).padding(.bottom, 10)
                 ForEach(ComposerAccessChoice.allCases.filter { provider == "claude" ? ($0.isClaude && ($0 != .dontAsk || selection == .dontAsk)) : !$0.isClaude }, id: \.self) { choice in
-                    Button { select(choice) } label: {
+                    Button {
+                        if choice == .bypassPermissions && !options.contains(choice.rawValue) { onEnableBypass?() }
+                        else { select(choice) }
+                    } label: {
                         HStack(spacing: 11) {
                             Image(systemName: choice.symbol).font(.system(size: 18)).frame(width: 22)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(choice.title).font(.system(size: 15, weight: .medium))
-                                Text(choice.detail).font(.system(size: 12))
+                                Text(choice == .bypassPermissions && !options.contains(choice.rawValue) && onEnableBypass != nil ? "Restart and resume this chat with permission prompts skipped." : choice.detail).font(.system(size: 12))
                                     .foregroundStyle((choice == .full || choice == .bypassPermissions) ? ComposerPalette.orange.opacity(0.9) : ComposerPalette.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -271,9 +277,9 @@ private struct ComposerAccessPopover: View {
                     }
                     .buttonStyle(ComposerOptionStyle(selected: selection == choice))
                     .accessibilityAddTraits(selection == choice ? .isSelected : [])
-                    .disabled(applying || !options.contains(choice.rawValue))
-                    .opacity(options.contains(choice.rawValue) ? 1 : 0.4)
-                    .help(options.contains(choice.rawValue) ? choice.title : "This option is unavailable in this session.")
+                    .disabled(applying || (!options.contains(choice.rawValue) && !(choice == .bypassPermissions && onEnableBypass != nil)))
+                    .opacity(options.contains(choice.rawValue) || (choice == .bypassPermissions && onEnableBypass != nil) ? 1 : 0.4)
+                    .help(options.contains(choice.rawValue) ? choice.title : choice == .bypassPermissions && onEnableBypass != nil ? "Restart and resume this chat with Bypass permissions" : "This option is unavailable in this session.")
                 }
             }
         }
@@ -313,6 +319,8 @@ private struct ComposerSettingsPopover: View {
     let onModel: (String) -> Void
     let onEffort: (String) -> Void
     let onSpeed: (String) -> Void
+
+    var onRestart: (() -> Void)? = nil
 
     @State private var showingModels = false
     @State private var previewIndex: Int?
@@ -423,6 +431,11 @@ private struct ComposerSettingsPopover: View {
                     Text("Select model").font(.system(size: 13))
                 }.foregroundStyle(ComposerPalette.secondary).padding(12)
             }.buttonStyle(.plain).accessibilityLabel("Back to reasoning effort")
+            if let onRestart {
+                Button("Restart Claude and refresh models", action: onRestart)
+                    .buttonStyle(.plain).font(.system(size: 12)).padding(12).disabled(applying)
+                    .help("Resume this chat using the installed Claude Code version.")
+            }
             if models.isEmpty {
                 Text("Model choices are unavailable for this session.")
                     .font(.system(size: 13)).foregroundStyle(ComposerPalette.secondary)

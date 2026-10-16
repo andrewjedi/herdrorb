@@ -10,7 +10,7 @@ struct PearlOrb: NSViewRepresentable {
         view.clearColor = MTLClearColorMake(0, 0, 0, 0)
         view.layer?.isOpaque = false
         view.colorPixelFormat = .bgra8Unorm
-        view.preferredFramesPerSecond = 60
+        view.preferredFramesPerSecond = 30
         if let renderer = OrbRenderer(view) { context.coordinator.renderer = renderer; view.delegate = renderer }
         return view
     }
@@ -27,6 +27,7 @@ struct PearlOrb: NSViewRepresentable {
 final class OrbMetalView: MTKView {
     private var visibilityObserver: NSObjectProtocol?
     private var accessibilityObserver: NSObjectProtocol?
+    private var powerObservers: [NSObjectProtocol] = []
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let visibilityObserver { NotificationCenter.default.removeObserver(visibilityObserver) }
@@ -34,17 +35,25 @@ final class OrbMetalView: MTKView {
         if accessibilityObserver == nil {
             accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { [weak self] _ in self?.updateActivity() }
         }
+        if powerObservers.isEmpty {
+            for name in [Notification.Name.NSProcessInfoPowerStateDidChange, ProcessInfo.thermalStateDidChangeNotification] {
+                powerObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.updateActivity() })
+            }
+        }
         updateActivity()
     }
     func updateActivity() {
-        let visible = window?.isVisible == true && !isHiddenOrHasHiddenAncestor
+        let visible = window?.isVisible == true && window?.occlusionState.contains(.visible) == true && !isHiddenOrHasHiddenAncestor
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         (delegate as? OrbRenderer)?.reduceMotion = reduceMotion
+        let constrained = ProcessInfo.processInfo.isLowPowerModeEnabled || ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+        preferredFramesPerSecond = constrained ? 15 : ((delegate as? OrbRenderer)?.hovered == true ? 60 : 30)
         isPaused = !visible || reduceMotion
         enableSetNeedsDisplay = reduceMotion
         if reduceMotion && visible { setNeedsDisplay(bounds) }
     }
     deinit {
+        powerObservers.forEach { NotificationCenter.default.removeObserver($0) }
         if let visibilityObserver { NotificationCenter.default.removeObserver(visibilityObserver) }
         if let accessibilityObserver { NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver) }
     }
@@ -62,6 +71,8 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
     private var hoverAmount: Float = 0
     var reduceMotion = false
     var canvasScale: Float = 1
+    private let inFlight = DispatchSemaphore(value: 2)
+    private var previousFrameTime = CACurrentMediaTime()
     let start = CACurrentMediaTime()
     init?(_ view: MTKView) {
         guard let device = view.device, let queue = device.makeCommandQueue() else { return nil }
@@ -297,11 +308,17 @@ final class OrbRenderer: NSObject, MTKViewDelegate {
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     func draw(in view: MTKView) {
+        // Drop work when the GPU is busy instead of queuing frames or blocking the UI.
+        guard inFlight.wait(timeout: .now()) == .success else { return }
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
-              let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
+              let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { inFlight.signal(); return }
+        command.addCompletedHandler { [inFlight] _ in inFlight.signal() }
+        let now = CACurrentMediaTime()
+        let delta = min(0.1, now - previousFrameTime)
+        previousFrameTime = now
         var time = reduceMotion ? Float(0) : Float(CACurrentMediaTime() - start)
         var canvasScale = canvasScale
-        hoverAmount += ((hovered ? 1 : 0) - hoverAmount) * 0.12
+        hoverAmount += ((hovered ? 1 : 0) - hoverAmount) * Float(1 - exp(-7.7 * delta))
         encoder.setRenderPipelineState(pipeline)
         var hasArtwork: UInt32 = artworkTexture == nil ? 0 : 1
         encoder.setFragmentBytes(&hasArtwork, length: 4, index: 3)

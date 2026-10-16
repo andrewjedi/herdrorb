@@ -122,7 +122,7 @@ enum ProviderTranscriptDecoder {
                 }
             } else if reference.agent == "claude" {
                 if record["type"] as? String == "system", record["subtype"] as? String == "compact_boundary" { batch.cursor.usage = nil; batch.cursor.compactedAt = timestamp }
-                if record["isSidechain"] as? Bool != true,
+                if record["isSidechain"] as? Bool != true, record["isMeta"] as? Bool != true,
                    let role = record["type"] as? String, ["user", "assistant"].contains(role),
                    let body = record["message"] as? [String: Any], let id = record["uuid"] as? String {
                     batch.cursor.model = body["model"] as? String ?? batch.cursor.model
@@ -131,7 +131,8 @@ enum ProviderTranscriptDecoder {
                         guard part["type"] as? String == "text" else { return nil }; return part["text"] as? String
                     }.joined(separator: "\n")
                     // Tool results (role=user) are not user messages. Thinking blocks stay private.
-                    if !text.isEmpty { batch.messages.append((Int64(position), message(id: id, text: text, user: role == "user", phase: nil, provider: "claude"))) }
+                    let localCommand = role == "user" && ["<command-name>", "<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"].contains { text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix($0) }
+                    if !text.isEmpty && !localCommand { batch.messages.append((Int64(position), message(id: id, text: text, user: role == "user", phase: nil, provider: "claude"))) }
                 }
             }
             batch.cursor.offset = chunk.offset + UInt64(start)

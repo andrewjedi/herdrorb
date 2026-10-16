@@ -111,7 +111,8 @@ struct ConversationComposer: View {
             enabled: (session.settingsBusy || model.canChangeAgentSettings(agent)) && !dictation.isRecording,
             applying: session.settingsBusy, onAccess: { change("access", $0) }, onModel: { change("model", $0) },
             onEffort: { change("effort", $0) }, onSpeed: { change("speed", $0) },
-            onRefresh: { Task { await model.refreshAgentSettings(agent) } })
+            onRefresh: { Task { await model.refreshAgentSettings(agent) } },
+            onRestartClaude: agent.agent == "claude" ? { bypass in Task { await model.restartClaude(agent, bypass: bypass) } } : nil)
     }
     private func change(_ key: String, _ value: String) {
         Task { await model.updateAgentSetting(agent, key: key, value: value) }

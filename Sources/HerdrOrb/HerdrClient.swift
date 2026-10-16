@@ -100,10 +100,13 @@ struct PendingMessage: Identifiable, Equatable {
     // Raw terminal spinners/footer changes are not conversation view updates.
     var output = "" {
         didSet {
+            let setup = TerminalSetupScreen.parse(output)
+            if terminalSetup != setup { terminalSetup = setup }
             let next = TerminalPresentation.activityNotice(output, status: "working")
             if activityMessage != next { activityMessage = next }
         }
     }
+    @Published var terminalSetup: TerminalSetupScreen?
     var history = ""
     @Published var contextUsage: ContextUsage?
     @Published var transcriptNotice: String?
@@ -136,6 +139,7 @@ struct PendingMessage: Identifiable, Equatable {
     @Published var claudeSettings = SessionComposerSettings()
     var claudeSettingsLoadAttempted = false
     @Published var settingsBusy = false
+    var claudeBypassEnabled = false
     var settingsLoadAttempted = false
     @Published var terminalConnected = false
     var terminalSeed: String?
@@ -267,7 +271,7 @@ struct PendingMessage: Identifiable, Equatable {
             connection["local"] = ConnectionState.failure(error)
             connectionDetails["local"] = error.localizedDescription
             if machines.isEmpty { machines = [.local] }
-            if !connection.values.contains(.online) { showingSetup = true }
+            if !connection.values.contains(.online) && !preferences.bool(forKey: "completedSetup") { showingSetup = true }
         }
     }
     private func startWorker(_ machine: Machine) {
@@ -355,7 +359,7 @@ struct PendingMessage: Identifiable, Equatable {
                             await choose(fresh)
                         }
                     } else if self.selected != fresh { self.selected = fresh }
-                } else { showMachine(machine.id) }
+                } else if !state(selected).settingsBusy { showMachine(machine.id) }
             }
             let inventory = machines.map { machine in MachineInventory(machine: machine, agents: agents.filter { $0.machineID == machine.id }) }
             await cache.saveInventory(inventory)
@@ -484,6 +488,11 @@ struct PendingMessage: Identifiable, Equatable {
             state.revision = read["revision"] as? Int
             if state.cached { state.notice = nil; state.cached = false }
             if state.output != text {
+                if agent.agent == "claude", TerminalSetupScreen.parse(text) != nil {
+                    state.output = text
+                    state.notice = nil
+                    return
+                }
                 let history = state.history, lastClean = state.lastCleanOutput, previous = state.messages
                 state.parseVersion += 1
                 let version = state.parseVersion
@@ -542,7 +551,7 @@ struct PendingMessage: Identifiable, Equatable {
         let current = agents.first { $0.id == agent.id && $0.profileIdentity == agent.profileIdentity } ?? agent
         let session = state(agent)
         return ["codex", "claude"].contains(agent.agent) && canInteract(agent) && !session.terminal && !session.busy
-            && !["working", "blocked"].contains(current.agent_status)
+            && session.terminalSetup == nil && !["working", "blocked"].contains(current.agent_status)
     }
     func refreshAgentSettings(_ agent: Agent) async {
         if agent.agent == "codex" { await refreshCodexSettings(agent); return }
@@ -552,10 +561,48 @@ struct PendingMessage: Identifiable, Equatable {
         guard let transport = transports[agent.machineID], !isDemo else { return }
         session.settingsBusy = true
         defer { session.settingsBusy = false }
-        do { session.claudeSettings = try await ClaudeSettingsBridge(connection: transport, paneID: agent.pane_id).refresh() }
+        do {
+            session.claudeSettings = try await ClaudeSettingsBridge(connection: transport, paneID: agent.pane_id).refresh()
+            if session.claudeSettings.access == "bypassPermissions" { session.claudeBypassEnabled = true }
+            if session.claudeBypassEnabled && !session.claudeSettings.accessOptions.contains("bypassPermissions") { session.claudeSettings.accessOptions.append("bypassPermissions") }
+            session.notice = nil
+            if let machine = machines.first(where: { $0.id == agent.machineID }) { await refreshMachine(machine) }
+        }
         catch is CancellationError { session.claudeSettingsLoadAttempted = false }
         catch { session.notice = "Couldn't read Claude settings. \(error.localizedDescription)" }
     }
+    func restartClaude(_ agent: Agent, bypass: Bool = false) async {
+        let session = state(agent)
+        guard agent.agent == "claude", canChangeAgentSettings(agent), !session.settingsBusy,
+              let machine = machines.first(where: { $0.id == agent.machineID }),
+              let transport = transports[agent.machineID], !isDemo else { return }
+        let current = agents.first(where: { $0.id == agent.id }) ?? agent
+        guard let sessionID = current.providerSession?.sessionID else {
+            session.notice = "Connect saved history before restarting so the same chat can be resumed."
+            return
+        }
+        session.settingsBusy = true
+        defer { session.settingsBusy = false; resumeLive() }
+        do {
+            try await ClaudeSettingsBridge(connection: transport, paneID: agent.pane_id)
+                .restart(machine: machine, sessionID: sessionID, bypass: bypass)
+            session.claudeBypassEnabled = false
+            session.claudeSettings = SessionComposerSettings()
+            session.claudeSettingsLoadAttempted = false
+            session.notice = nil
+            let screenResult = try await transport.call("pane.read", ["pane_id": agent.pane_id, "source": "visible", "format": "text", "strip_ansi": true])
+            let text = (screenResult["read"] as? [String: Any])?["text"] as? String ?? ""
+            if let setup = TerminalSetupScreen.parse(text) {
+                session.terminalSetup = setup
+            } else {
+                session.claudeSettings = try await ClaudeSettingsBridge(connection: transport, paneID: agent.pane_id).refresh()
+                session.claudeBypassEnabled = session.claudeSettings.access == "bypassPermissions"
+                session.claudeSettingsLoadAttempted = true
+            }
+        } catch { session.notice = "Restart was not confirmed. \(error.localizedDescription) Check Terminal before retrying." }
+        await refreshMachine(machine)
+    }
+
     func updateAgentSetting(_ agent: Agent, key: String, value: String) async {
         if agent.agent == "codex" { await updateCodexSetting(agent, key: key, value: value); return }
         let session = state(agent)
@@ -566,9 +613,17 @@ struct PendingMessage: Identifiable, Equatable {
         do {
             session.claudeSettings = try await ClaudeSettingsBridge(connection: transport, paneID: agent.pane_id)
                 .update(key: key, value: value, current: session.claudeSettings)
+            if session.claudeBypassEnabled && !session.claudeSettings.accessOptions.contains("bypassPermissions") { session.claudeSettings.accessOptions.append("bypassPermissions") }
             session.notice = nil
+            if let machine = machines.first(where: { $0.id == agent.machineID }) { await refreshMachine(machine) }
         } catch {
-            session.claudeSettings = SessionComposerSettings()
+            switch key {
+            case "access": session.claudeSettings.access = nil
+            case "model": session.claudeSettings.model = nil; session.claudeSettings.effort = nil
+            case "effort": session.claudeSettings.effort = nil
+            case "speed": session.claudeSettings.speed = nil
+            default: break
+            }
             session.notice = "Couldn't confirm the Claude setting. \(error.localizedDescription)"
         }
     }
@@ -576,7 +631,7 @@ struct PendingMessage: Identifiable, Equatable {
         let current = agents.first { $0.id == agent.id && $0.profileIdentity == agent.profileIdentity } ?? agent
         let session = state(agent)
         return agent.agent == "codex" && canInteract(agent) && !session.terminal && !session.busy
-            && !["working", "blocked"].contains(current.agent_status)
+            && session.terminalSetup == nil && !["working", "blocked"].contains(current.agent_status)
     }
     func refreshCodexSettings(_ agent: Agent) async {
         let session = state(agent)
@@ -689,6 +744,7 @@ struct PendingMessage: Identifiable, Equatable {
             state.notice = "This session needs a response in Terminal. Your chat draft has been kept."
             return
         }
+        guard state.terminalSetup == nil else { state.notice = "Use the setup controls to finish signing in."; return }
         if Self.isSlashCommand(text) {
             openSlashCommands(agent, text: text, fromDraft: true, submit: true)
             return
@@ -713,6 +769,59 @@ struct PendingMessage: Identifiable, Equatable {
             state.notice = "Message delivery was not confirmed. Check the terminal before resending. \(error.localizedDescription)"
             persist(agent)
         }
+    }
+    func claudeAccount(_ agent: Agent, signOut: Bool) async {
+        let session = state(agent)
+        guard agent.agent == "claude", canInteract(agent), !session.busy, !session.settingsBusy,
+              agent.agent_status != "working", let transport = transports[agent.machineID] else { return }
+        session.settingsBusy = true
+        defer { session.settingsBusy = false }
+        do {
+            let result = try await transport.call("pane.read", ["pane_id": agent.pane_id, "source": "visible", "format": "text", "strip_ansi": true])
+            guard let read = result["read"] as? [String: Any], let text = read["text"] as? String,
+                  ClaudeSettingsScreen.prompt(text) == "", TerminalSetupScreen.parse(text) == nil else {
+                respondInTerminal(agent)
+                session.notice = "Finish the current terminal prompt first, then run /logout to sign out or /login to switch accounts."
+                return
+            }
+            _ = try await transport.call("pane.send_text", ["pane_id": agent.pane_id, "text": signOut ? "/logout" : "/login"])
+            _ = try await transport.call("pane.send_keys", ["pane_id": agent.pane_id, "keys": ["enter"]])
+            respondInTerminal(agent)
+        } catch { session.notice = "Account command was not confirmed. Check Terminal before retrying." }
+    }
+    /// Direct, explicit terminal input; never add chat instructions or retry automatically.
+    func setupInput(_ agent: Agent, key: String? = nil, code: String? = nil, option: String? = nil) async {
+        let session = state(agent)
+        guard canInteract(agent), !session.busy, !session.settingsBusy,
+              let screen = session.terminalSetup, let transport = transports[agent.machineID] else { return }
+        session.busy = true
+        defer { session.busy = false }
+        do {
+            let result = try await transport.call("pane.read", ["pane_id": agent.pane_id, "source": "visible", "format": "text", "strip_ansi": true])
+            guard let read = result["read"] as? [String: Any], let text = read["text"] as? String,
+                  TerminalSetupScreen.parse(text) == screen else {
+                session.notice = "The setup screen changed. Check the current options and try again."
+                return
+            }
+            if let option {
+                guard let target = screen.options.firstIndex(of: option),
+                      let current = screen.options.firstIndex(where: { screen.selectedOption?.contains($0) == true }) else {
+                    session.notice = "Use the arrow buttons to choose an option."
+                    return
+                }
+                let keys = Array(repeating: target > current ? "down" : "up", count: abs(target - current))
+                if !keys.isEmpty { _ = try await transport.call("pane.send_keys", ["pane_id": agent.pane_id, "keys": keys]) }
+            } else if let code {
+                let value = code.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard screen.waitingForCode, !value.isEmpty,
+                      value.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil else { return }
+                _ = try await transport.call("pane.send_text", ["pane_id": agent.pane_id, "text": value])
+                _ = try await transport.call("pane.send_keys", ["pane_id": agent.pane_id, "keys": ["enter"]])
+            } else if let key, ["up", "down", "enter", "escape", "1", "2", "3", "4", "5", "6", "7", "8", "9"].contains(key) {
+                _ = try await transport.call("pane.send_keys", ["pane_id": agent.pane_id, "keys": [key]])
+            }
+            session.notice = nil
+        } catch { session.notice = "Terminal input was not confirmed. Check Terminal before retrying." }
     }
     func interrupt() async {
         guard let agent = selected, canInteract(agent), let transport = transports[agent.machineID] else { return }
@@ -751,7 +860,8 @@ struct PendingMessage: Identifiable, Equatable {
             availability[machine.id] = installed
             guard installed.contains(kind) else { throw BridgeError.message("Install \(kind == "claude" ? "Claude Code" : "Codex") on \(machine.label) and sign in from Terminal before starting a session.") }
             var params: [String: Any] = ["focus": false, "label": sessionNames.reserveNumber()]
-            let folder = directory.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Folder selection already resolves on the target device. Preserve its exact name.
+            let folder = directory
             if !folder.isEmpty { params["cwd"] = folder }
             let result = try await transport.call("tab.create", params)
             guard let pane = result["root_pane"] as? [String: Any], let paneId = pane["pane_id"] as? String else { throw BridgeError.message("Tab created without a pane ID") }
@@ -892,7 +1002,7 @@ struct PendingMessage: Identifiable, Equatable {
                 try await ProviderBridge.connectCodex(machine: machine)
                 if !["working", "blocked"].contains(agent.agent_status), let connection = transports[agent.machineID],
                    let id = try await CodexSettingsBridge(connection: connection, paneID: agent.pane_id).identifySession() {
-                    _ = try await connection.call("pane.report_agent_session", ["pane_id": agent.pane_id, "source": "herdrorb:codex", "agent": "codex", "agent_session_id": id])
+                    _ = try await connection.call("pane.report_agent_session", ["pane_id": agent.pane_id, "source": "herdr:codex", "agent": "codex", "agent_session_id": id])
                     state.notice = "Codex saved history connected."
                 } else {
                     state.notice = "Codex integration installed. Connect again when the agent is idle, or resume the session in Terminal."

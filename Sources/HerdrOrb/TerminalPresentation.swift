@@ -38,10 +38,22 @@ enum TerminalPresentation {
     }
 
     private static func removingClaudeSettings(_ raw: String) -> String {
-        let lines = raw.components(separatedBy: "\n")
+        var lines = raw.replacingOccurrences(of: "\u{00a0}", with: " ").components(separatedBy: "\n")
+        if let menu = lines.lastIndex(where: { ["Select model", "Effort", "Fast mode (research preview)"].contains($0.trimmingCharacters(in: .whitespaces)) }),
+           lines.dropFirst(menu).contains(where: { $0.contains("Esc to cancel") || $0.contains("Esc to exit") }) {
+            lines = Array(lines.prefix(menu))
+        }
+        if lines.contains(where: { $0.contains("Welcome to Claude Code") || $0.contains("Welcome back") }) {
+            if let start = lines.firstIndex(where: {
+                let t = $0.trimmingCharacters(in: .whitespaces)
+                return t.hasPrefix("❯ ") && t != "❯" && !t.hasPrefix("❯ /") && !t.hasPrefix("❯ Try ")
+            }) { lines = Array(lines.dropFirst(start)) }
+            else { return "" }
+        }
         var result: [String] = []
         var index = 0
         var fence: String?
+        var footer = false
         while index < lines.count {
             let line = lines[index]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -49,15 +61,25 @@ enum TerminalPresentation {
                 let marker = String(trimmed.prefix(3))
                 if fence == marker { fence = nil } else if fence == nil { fence = marker }
             }
+            if fence == nil {
+                if trimmed == "❯" || trimmed.hasPrefix("❯ Try ") { footer = true; index += 1; continue }
+                if footer {
+                    if trimmed.hasPrefix("❯ ") || trimmed.hasPrefix("⏺ ") || trimmed.hasPrefix("● ") || trimmed.hasPrefix("• ") { footer = false }
+                    else { index += 1; continue }
+                }
+                if !trimmed.isEmpty && trimmed.allSatisfy({ "─━═┄┈ ".contains($0) }) { index += 1; continue }
+                if trimmed == "— Live terminal view —" { index += 1; continue }
+            }
             if fence == nil, ["❯ /model", "❯ /effort", "❯ /fast", "❯ /fast on", "❯ /fast off"].contains(trimmed), index + 1 < lines.count {
                 let response = lines[index + 1].trimmingCharacters(in: .whitespaces)
                 let commandResponse = response.hasPrefix("⎿") && ["Kept model as ", "Set model to ", "Cancelled", "Fast mode ON", "Fast mode OFF", "Set effort to ", "Effort set to "].contains { response.dropFirst().trimmingCharacters(in: .whitespaces).hasPrefix($0) }
                 if commandResponse { index += 2; continue }
             }
+            if fence == nil && ["❯ /model", "❯ /effort", "❯ /fast"].contains(trimmed) { index += 1; continue }
             result.append(line)
             index += 1
         }
-        return result.joined(separator: "\n")
+        return result.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The native settings controls ask the CLI for /status. Its boxed account and
@@ -420,7 +442,9 @@ extension TerminalPresentation {
         }
         var inCode = false
         var skippingFooter = false
-        for line in lines {
+        for original in lines {
+            let left = original.trimmingCharacters(in: .whitespaces)
+            let line = kind == "claude" && !inCode && (left.hasPrefix("❯") || left.hasPrefix("⏺")) ? left : original
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if kind == "codex" && !inCode {
                 // Empty CLI composers can occur anywhere in accumulated snapshots.
@@ -449,8 +473,8 @@ extension TerminalPresentation {
             if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") { inCode.toggle() }
             if line.hasPrefix(marker) && !inCode {
                 flush(); user = true; buffer.append(String(line.dropFirst(marker.count)))
-            } else if user && !inCode && (line.hasPrefix("• ") || line.hasPrefix("● ") || line.hasPrefix("✔ You approved") || line.hasPrefix("✓ You approved")) {
-                flush(); user = false; buffer.append(line)
+            } else if user && !inCode && (line.hasPrefix("• ") || line.hasPrefix("● ") || line.hasPrefix("⏺ ") || line.hasPrefix("✔ You approved") || line.hasPrefix("✓ You approved")) {
+                flush(); user = false; buffer.append(kind == "claude" && line.hasPrefix("⏺ ") ? String(line.dropFirst(2)) : line)
             } else {
                 buffer.append(line)
             }
@@ -488,5 +512,63 @@ struct ConversationBlock: Equatable {
         }
         if let code { blocks.append(.init(kind: .code, text: code.joined(separator: "\n"))) }
         return blocks
+    }
+}
+
+/// A setup screen is terminal interaction, never a model message.
+struct TerminalSetupScreen: Equatable {
+    var link: URL?
+    var waitingForCode: Bool
+    var options: [String]
+    var selectedOption: String?
+    var continueMessage: String? = nil
+    var continueDetails: String? = nil
+    static func parse(_ text: String) -> Self? {
+        let lower = text.lowercased()
+        if (text.contains("Select model") || text.contains("\nEffort\n") || text.contains("Fast mode (research preview)")) &&
+            (text.contains("Esc to cancel") || text.contains("Esc to exit")) { return nil }
+        let visibleLines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        // Only a current terminal prompt qualifies, not an earlier quoted message.
+        if let last = visibleLines.last(where: { !$0.isEmpty }),
+           last.range(of: "^(Login successful[.!] ?)?Press (Enter|Return) to continue[.…]*$", options: [.regularExpression, .caseInsensitive]) != nil {
+            let details = visibleLines.dropLast(visibleLines.reversed().prefix(while: { $0.isEmpty }).count).dropLast()
+                .filter { $0.rangeOfCharacter(from: .alphanumerics) != nil }
+                .joined(separator: "\n")
+            return Self(link: nil, waitingForCode: false, options: [], selectedOption: nil, continueMessage: last, continueDetails: details.isEmpty ? nil : details)
+        }
+        // Modern Claude uses unnumbered choices for workspace trust.
+        if lower.contains("enter to confirm"),
+           let start = visibleLines.lastIndex(where: { $0 == "Accessing workspace:" || $0 == "WARNING: Claude Code running in Bypass Permissions mode" || $0 == "Claude in Chrome extension detected" }),
+           let selected = visibleLines[start...].first(where: { $0.hasPrefix("❯ ") }),
+           ["No, exit", "Yes, I trust this folder", "Yes, I accept", "No, keep browser tools off", "Yes, use my browser"].contains(String(selected.dropFirst(2))) {
+            let choices = visibleLines[start...].map { $0.hasPrefix("❯ ") ? String($0.dropFirst(2)) : $0 }
+                .filter { ["No, exit", "Yes, I trust this folder", "Yes, I accept", "No, keep browser tools off", "Yes, use my browser"].contains($0) }
+            guard choices.count == 2 else { return nil }
+            return Self(link: nil, waitingForCode: false, options: choices, selectedOption: selected,
+                        continueDetails: visibleLines[start...].filter { $0.rangeOfCharacter(from: .alphanumerics) != nil }.joined(separator: "\n"))
+        }
+        let choiceMenu = lower.contains("enter to confirm") && text.range(of: "(?m)^\\s*❯\\s*[1-9][.)] ", options: .regularExpression) != nil
+        guard choiceMenu || lower.contains("paste code here") || lower.contains("browser didn't open") ||
+              lower.contains("select login method") || lower.contains("choose the text style") ||
+              lower.contains("claude account with subscription") || lower.contains("anthropic console account") else { return nil }
+        let lines = text.components(separatedBy: .newlines)
+        var address = ""
+        if let start = lines.lastIndex(where: { $0.contains("https://claude.ai/oauth/authorize?") }) {
+            let first = lines[start]
+            address = String(first[first.range(of: "https://claude.ai/oauth/authorize?")!.lowerBound...]).trimmingCharacters(in: .whitespaces)
+            for line in lines.dropFirst(start + 1) {
+                let part = line.trimmingCharacters(in: .whitespaces)
+                guard !part.isEmpty, part.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+                      part.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~:/?#[]@!$&'()*+,;=%").contains($0) }) else { break }
+                address += part
+            }
+        }
+        let options = lines.compactMap { line -> String? in
+            let clean = line.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "❯ ", with: "")
+            guard clean.range(of: "^[1-9][.)] ", options: .regularExpression) != nil else { return nil }
+            return clean
+        }
+        let url = URL(string: address)
+        return Self(link: url?.host == "claude.ai" ? url : nil, waitingForCode: lower.contains("paste code here"), options: options, selectedOption: lines.first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("❯") }), continueDetails: choiceMenu ? visibleLines.filter { $0.rangeOfCharacter(from: .alphanumerics) != nil }.joined(separator: "\n") : nil)
     }
 }

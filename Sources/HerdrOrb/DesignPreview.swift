@@ -8,6 +8,8 @@ enum DesignPreviewScreen: String, CaseIterable {
     case imageConversation = "18-image-conversation"
     case structuredCodex = "19-structured-codex"
     case structuredClaude = "20-structured-claude"
+    case claudeLogin = "21-claude-login"
+    case claudeLoginChoices = "22-claude-login-choices"
     case conversation = "01-conversation"
     case terminal = "02-terminal"
     case newSession = "03-new-session"
@@ -18,6 +20,8 @@ enum DesignPreviewScreen: String, CaseIterable {
     case projects = "08-project-defaults"
     case folders = "09-folder-browser"
     case empty = "10-empty-state"
+    case deviceOffline = "23-device-overview"
+    case deviceTerminal = "24-device-terminal"
     case recovery = "11-launch-recovery"
     case dialogs = "12-dialogs-and-states"
     case orb = "13-orb-and-preview"
@@ -114,6 +118,12 @@ struct DemoTerminal: NSViewRepresentable {
         model.preferences.set(false, forKey: "orbHoverSound")
         model.preferences.set(OrbStyle.nebula.rawValue, forKey: "orbStyle")
         switch screen {
+        case .claudeLogin, .claudeLoginChoices:
+            model.selected = model.agents[1]
+            model.selectedMachineID = model.selected!.machineID
+            model.current.output = screen == .claudeLogin
+                ? "Browser didn't open?\nhttps://claude.ai/oauth/authorize?state=fictional-preview\n\nPaste code here if prompted >"
+                : "Select login method:\n❯ 1. Claude account with subscription\n  2. Anthropic Console account\n  3. Third-party platform"
         case .structuredCodex, .structuredClaude:
             let provider = screen == .structuredClaude ? "claude" : "codex"
             model.selected = model.agents[screen == .structuredClaude ? 1 : 0]
@@ -144,6 +154,17 @@ struct DemoTerminal: NSViewRepresentable {
             model.connectionDetails = ["local": "Install Herdr and start it, then check again."]
             model.herdrVersions = [:]; model.showingSetup = true
         case .terminal: model.current.terminal = true
+        case .deviceTerminal:
+            model.selected = nil
+            model.selectedMachineID = "demo-studio"
+            DeviceTerminalStore.shared.closeAll()
+            DeviceTerminalStore.shared.create(machine: model.machines[1], startsHerdr: false)
+        case .deviceOffline:
+            model.selected = nil
+            model.selectedMachineID = "demo-studio"
+            model.machines[1].target = "andrew@studio-mac"
+            model.connection["demo-studio"] = .stopped
+            model.connectionDetails["demo-studio"] = "Herdr is stopped. Start it to reconnect your agent sessions, or open a terminal directly."
         case .empty: model.selected = nil; model.agents = []
         case .recovery: model.failedLaunches["local"] = FailedLaunch(paneID: "demo-pane", kind: "codex", detail: "Codex requires sign-in on This Mac.")
         case .privacy: model.savingConversations = true

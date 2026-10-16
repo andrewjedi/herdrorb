@@ -9,26 +9,28 @@ enum EtherealMembrane {
 
     static func point(geometry: OrbPanelGeometry, frame: CGRect, t: CGFloat, fraction: CGFloat, phase: CGFloat = 0) -> CGPoint {
         let direction: CGFloat = geometry.panelOnRight ? 1 : -1
-        let startX = geometry.orb.midX + direction * 20
+        let startX = geometry.orb.midX + direction * 20 * geometry.orbScale
         let edge = geometry.panelOnRight ? frame.minX + 3 : frame.maxX - 3
         let reach = edge - startX, u = 1 - t
         let x = u*u*u*startX + 3*u*u*t*(startX+reach*0.65) + 3*u*t*t*(edge-reach*0.29) + t*t*t*edge
         let ease = t*t*(3-2*t)
-        let bottom = (geometry.orb.midY - 34)*(1-ease) + (frame.minY+12)*ease
-        let top = (geometry.orb.midY + 34)*(1-ease) + (frame.maxY-12)*ease
+        let neck = (geometry.compact ? 5 : 34) * geometry.orbScale
+        let attachmentY = min(frame.maxY - 20, max(frame.minY + 20, geometry.orb.midY))
+        let bottom = (geometry.orb.midY - neck)*(1-ease) + (geometry.compact ? attachmentY - 9 : frame.minY+12)*ease
+        let top = (geometry.orb.midY + neck)*(1-ease) + (geometry.compact ? attachmentY + 9 : frame.maxY-12)*ease
         let flutter = sin(.pi*t) * sin(t*5.3 + fraction*9 + phase) * 0.023 * sin(.pi*fraction)
         return CGPoint(x: x, y: bottom + (top-bottom)*(fraction+flutter))
     }
     static func sheet(geometry: OrbPanelGeometry, frame: CGRect, center: CGFloat, width: CGFloat, phase: CGFloat = 0) -> CGPath {
         let path = CGMutablePath()
-        for index in 0...32 {
-            let t = CGFloat(index)/32
+        for index in 0...16 {
+            let t = CGFloat(index)/16
             let spread = width * (0.45 + 0.55*sin(.pi*t))
             let point = point(geometry: geometry, frame: frame, t: t, fraction: min(1,center+spread/2), phase: phase)
             if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
         }
-        for index in stride(from: 32, through: 0, by: -1) {
-            let t = CGFloat(index)/32
+        for index in stride(from: 16, through: 0, by: -1) {
+            let t = CGFloat(index)/16
             let spread = width * (0.45 + 0.55*sin(.pi*t))
             path.addLine(to: point(geometry: geometry, frame: frame, t: t, fraction: max(0,center-spread/2), phase: phase))
         }
@@ -36,12 +38,12 @@ enum EtherealMembrane {
     }
     static func silhouette(geometry: OrbPanelGeometry, frame: CGRect) -> CGPath {
         let p = CGMutablePath()
-        for i in 0...32 {
-            let q = point(geometry: geometry, frame: frame, t: CGFloat(i)/32, fraction: 1)
+        for i in 0...16 {
+            let q = point(geometry: geometry, frame: frame, t: CGFloat(i)/16, fraction: 1)
             if i == 0 { p.move(to: q) } else { p.addLine(to: q) }
         }
-        for i in stride(from: 32, through: 0, by: -1) {
-            p.addLine(to: point(geometry: geometry, frame: frame, t: CGFloat(i)/32, fraction: 0))
+        for i in stride(from: 16, through: 0, by: -1) {
+            p.addLine(to: point(geometry: geometry, frame: frame, t: CGFloat(i)/16, fraction: 0))
         }
         p.closeSubpath(); return p
     }
@@ -79,12 +81,12 @@ enum EtherealMembrane {
                 let (center,width) = fold
                 // Nested translucent sheets feather each fold across its width.
                 // A narrow specular crest grows out of a broad, faint violet reflection.
-                for band in 0..<8 {
-                    let weight = CGFloat(band)/7
+                for band in 0..<(geometry.compact ? 1 : 2) {
+                    let weight = CGFloat(band)
                     let breadth = width * (1.8 - 1.68*weight)
                     let paths = frames.map { sheet(geometry: geometry, frame: $0, center: center, width: breadth) }
                     let tint = violet.blended(withFraction: weight*0.9, of: pearl)!
-                    let strength: CGFloat = (index == 0 || index == 7 ? 0.15 : 0.085)
+                    let strength: CGFloat = (index == 0 || index == 7 ? 0.22 : 0.15)
                     let (surface, mask) = gradient(paths: paths,
                         colors: [tint.withAlphaComponent(strength*0.8),tint.withAlphaComponent(strength*0.12),tint.withAlphaComponent(strength),tint.withAlphaComponent(strength*0.2),tint.withAlphaComponent(strength*0.8)],
                         locations: [0,0.19,NSNumber(value: 0.46+Double(index%3)*0.06),0.78,1], horizontal: true)
@@ -106,8 +108,8 @@ enum EtherealMembrane {
             let nebulaMask = CAShapeLayer(); nebulaMask.fillColor = NSColor.white.cgColor
             animate(nebulaMask, key: "path", values: outlines.map { $0.copy(using: &offset)! }, duration: duration)
             nebula.mask = nebulaMask
-            for index in 0..<6 {
-                let fraction = CGFloat(index + 1) / 7
+            for index in 0..<(geometry.compact ? 0 : 3) {
+                let fraction = CGFloat(index + 1) / 4
                 let cloud = CAGradientLayer(); cloud.type = .radial
                 cloud.bounds = CGRect(x: 0, y: 0, width: 90 + CGFloat(index % 3) * 24, height: 70 + CGFloat(index % 2) * 48)
                 cloud.startPoint = CGPoint(x: 0.5, y: 0.5); cloud.endPoint = CGPoint(x: 1, y: 1)
@@ -160,7 +162,7 @@ enum EtherealMembrane {
                     }
                     return p
                 }
-                for (width,alpha,blur): (CGFloat,CGFloat,CGFloat) in [(5,0.30,10),(2.3,0.6,4),(0.7,0.95,0)] {
+                for (width,alpha,blur): (CGFloat,CGFloat,CGFloat) in [(2.3,0.35,0),(0.7,0.85,0)] {
                     let lip = CAShapeLayer(); lip.fillColor = nil; lip.lineWidth = width
                     lip.strokeColor = pearl.withAlphaComponent(alpha).cgColor
                     lip.shadowColor = violet.cgColor; lip.shadowOpacity = 0.85; lip.shadowRadius = blur; lip.shadowOffset = .zero
@@ -170,7 +172,7 @@ enum EtherealMembrane {
         }
         // A wide atmospheric bloom plus a sharp platinum edge frames the panel.
         let panelPaths = frames.map { CGPath(roundedRect: $0.insetBy(dx: -0.6, dy: -0.6), cornerWidth: 20, cornerHeight: 20, transform: nil) }
-        for (width,alpha,blur): (CGFloat,CGFloat,CGFloat) in [(5,0.38,22),(2.8,0.65,10),(1,0.95,3)] {
+        for (width,alpha,blur): (CGFloat,CGFloat,CGFloat) in [(2.8,0.35,0),(1,0.7,0)] {
             let halo = CAShapeLayer(); halo.fillColor = nil; halo.lineWidth = width
             halo.strokeColor = (width == 1 ? pearl : violet).withAlphaComponent(alpha).cgColor
             halo.shadowColor = violet.cgColor; halo.shadowOpacity = 0.95; halo.shadowRadius = blur; halo.shadowOffset = .zero

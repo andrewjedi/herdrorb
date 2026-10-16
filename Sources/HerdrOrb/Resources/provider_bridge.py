@@ -34,7 +34,7 @@ def report_session(payload):
     path = os.environ.get('HERDR_SOCKET_PATH')
     if not pane or not path:
         return
-    params = {'pane_id': pane, 'source': 'herdrorb:claude', 'agent': 'claude',
+    params = {'pane_id': pane, 'source': 'herdr:claude', 'agent': 'claude',
               'agent_session_id': session_id(payload['session_id']), 'seq': time.time_ns()}
     if payload.get('transcript_path'):
         params['agent_session_path'] = payload['transcript_path']

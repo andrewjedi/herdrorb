@@ -58,3 +58,31 @@ Regression coverage includes:
 Run `swift test`, `sh scripts/check.sh`, and `python3 scripts/tests/test_provider_bridge.py`. No paid model request is required by these tests. Synthetic tests are not a claim that every provider version, customized environment, or remote machine has had a live acceptance pass.
 
 Validated September 24, 2026: the Swift suite ran 73 tests with one skipped and zero failures; interaction checks and all five Python helper tests passed. The release app built successfully, includes the provider helper, and passed signature verification. The synthetic visible-row scrolling measurement reported a 3.36 ms CPU-frame p95; this is not an end-to-end display latency measurement.
+
+## First-run Claude setup
+
+Recognized Claude login/theme screens use a dedicated setup view instead of conversation Markdown. Wrapped OAuth URLs are reassembled without changing query characters, and exposed as Sign in / Copy link actions. Numbered choices, arrow keys, Return and Escape use explicit terminal key input; authorization codes use terminal text plus Return without chat instructions, receipts, or automatic retries. The visible setup screen is checked again before sending. Chat drafts are preserved. Settings probing is disabled while setup is active.
+
+Terminal hyperlinks use normal clicks. For a hard-wrapped Claude OAuth link, the terminal reconstructs the latest full link from its buffer before opening it. The account button offers Sign out and Switch account using Claude's `/logout` and `/login` commands. These require a fresh empty Claude prompt; an existing input or dialog opens Terminal with instructions instead. The app does not sign in or sign out merely by displaying these controls.
+
+Validation: 77 Swift tests, one skipped, zero failures, including URL wrapping at four widths, setup choices, normal-message exclusion, direct authorization-code input, draft preservation, and rejecting changed prompts. Login and option screens were also rendered using fictional fixtures. Live account authorization remains a user action.
+
+Post-login continuation screens remain in setup mode: a current “Login successful. Press Enter to continue” or “Press Enter/Return to continue” prompt gets a Continue button and Return keyboard shortcut. They use the same fresh-screen check and direct terminal key path; an empty chat prompt is never sent. Regression coverage checks the success screen, the ellipsis variant, ignoring old continuation text, disabling settings probing, and sending exactly one Enter.
+
+Numbered menus with a selected row and an explicit “Enter to confirm” footer, including workspace trust, are also interactive in conversation mode. The full warning and workspace path remain visible. Clicking an option sends only the necessary Up/Down keys to move the terminal highlight. Confirmation is a separate Confirm button / Return action; Escape cancels. Tests verify that highlighting “No, exit” sends Down without Enter.
+
+## Claude conversation and native settings parity
+
+The helper reports session identity with Herdr's accepted `herdr:claude` source (`herdr:codex` for Codex identification). An arbitrary source is ignored by Herdr even when the report RPC returns success. The Grogu session was verified to expose its exact `agent_session` after this correction. Claude's saved transcript omits internal `isMeta` entries and local-command wrappers; model-menu activity is not a user message.
+
+Claude 2.1.80 uses “Esc to exit”, an empty prompt placeholder, a model menu with inline Left/Right effort, and no explicit manual-mode footer. The bridge supports these along with the newer separate effort menu. Native model/effort popovers retain control while the CLI menu is used in the background and dismissed. Classic model menus confirm with Enter; newer menus use the session-only key when available. Claude versions that save model choices for future sessions retain their CLI behavior. Permissions expose normal, accept-edits and plan modes; restricted modes are not advertised as available merely because their labels exist in the UI. Fast controls remain unavailable unless confirmed by the connected session.
+
+Terminal fallback also removes Claude startup art, empty prompts, dividers, status footers and settings echoes, and splits Claude's `⏺` replies from user messages. Live validation against Grogu returned the three real model choices, Medium effort and normal permissions, with the CLI menu closed afterward. No model turn or permission change was needed for the live read check.
+
+### Claude restart and optional permissions
+
+The model popover now offers “Restart Claude and refresh models.” The bridge verifies an idle, empty prompt and the exact saved UUID before sending `/exit`, waits for the shell, and resumes with the current permission mode explicitly preserved. Only an `agent_pane_busy` rejection is retried; ambiguous failures never repeat a start. Startup dialogs stay in Conversation mode. Workspace trust, browser integration, and Bypass confirmation support current unnumbered choices as well as the older numbered UI.
+
+When Bypass is not already confirmed available, its Permissions row explicitly says it will restart and resume the chat. That action launches with the Bypass flags; Claude's own acceptance screen remains an explicit user choice. A normal model refresh does not enable Bypass. Once Bypass is observed active, it stays selectable after switching back to Manual within the app session.
+
+Live verification on Grogu: the old process was 2.1.80 while the installed executable was 2.1.282. Resuming the exact saved conversation exposed Fable 5.1, Opus 5.5, Sonnet 5, and the other CLI model rows. Verified the original messages and Manual mode after restart; no model request or Bypass acceptance was submitted during verification.

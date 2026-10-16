@@ -68,7 +68,7 @@ final class OrbPanelGeometryTests: XCTestCase {
             for flowing in [true, false] {
                 let scene = EtherealMembrane.make(geometry: geometry, frames: [geometry.panel], connected: true, bounds: geometry.orb.union(geometry.panel), flowing: flowing)
                 let clouds = scene.sublayers?.first { $0.name == "nebula" }?.sublayers ?? []
-                XCTAssertEqual(clouds.count, 6)
+                XCTAssertEqual(clouds.count, 3)
                 for cloud in clouds {
                     let flow = cloud.animation(forKey: "nebulaFlow") as? CAAnimationGroup
                     XCTAssertEqual(flow != nil, flowing)
@@ -80,6 +80,45 @@ final class OrbPanelGeometryTests: XCTestCase {
                 }
             }
         }
+    }
+    func testSmallOrbMaskAndNeckScaleTogether() {
+        for size: CGFloat in [76, 152] {
+            let geometry = OrbPanelGeometry(orb: CGRect(x: 0, y: 200, width: size, height: size), panel: CGRect(x: 220, y: 80, width: 900, height: 600))
+            XCTAssertEqual(geometry.orbOcclusionRect.width, 96 * size / 152)
+            let neck = EtherealMembrane.point(geometry: geometry, frame: geometry.panel, t: 0, fraction: 1)
+            XCTAssertEqual(neck.y - geometry.orb.midY, 34 * size / 152, accuracy: 0.001)
+            let mask = geometry.effectMask(in: geometry.orb.union(geometry.panel))
+            XCTAssertTrue(mask.contains(CGPoint(x: geometry.orb.midX + 50 * size / 152, y: geometry.orb.midY), using: .evenOdd))
+        }
+    }
+    func testMenuPlacementAndThinAttachmentAtScreenEdges() {
+        let screen = CGRect(x: -1200, y: -300, width: 1200, height: 800)
+        for size: CGFloat in [76, 152] {
+            for origin in [CGPoint(x: -1200, y: -300), CGPoint(x: -size, y: 500 - size)] {
+                let orb = CGRect(origin: origin, size: CGSize(width: size, height: size))
+                let menu = OrbMenuPlacement.frame(orb: orb, size: CGSize(width: 218, height: 180), screen: screen)
+                XCTAssertTrue(screen.contains(menu))
+                let geometry = OrbPanelGeometry(orb: orb, panel: menu, compact: true)
+                XCTAssertTrue(geometry.canConnect)
+                let top = EtherealMembrane.point(geometry: geometry, frame: menu, t: 1, fraction: 1)
+                let bottom = EtherealMembrane.point(geometry: geometry, frame: menu, t: 1, fraction: 0)
+                XCTAssertEqual(top.y - bottom.y, 18, accuracy: 0.001)
+                XCTAssertLessThan(top.y, menu.maxY)
+                XCTAssertGreaterThan(bottom.y, menu.minY)
+            }
+        }
+    }
+    @MainActor func testSettledConnectorHasNoRepeatingAnimations() {
+        let art = OrbPanelEffectView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        art.geometry = OrbPanelGeometry(orb: CGRect(x: 0, y: 200, width: 76, height: 76), panel: CGRect(x: 220, y: 80, width: 900, height: 600))
+        art.progress = 1
+        art.startFlow()
+        func verify(_ layer: CALayer) {
+            XCTAssertTrue((layer.animationKeys() ?? []).isEmpty)
+            layer.sublayers?.forEach(verify)
+            if let mask = layer.mask { verify(mask) }
+        }
+        if let layer = art.layer { verify(layer) } else { XCTFail("Missing cached connector") }
     }
     func testSpringArrivesQuicklyAndSettlesWithoutLargeBounce() {
         let spring = PanelSpring(position: 0, velocity: 0, target: 1)

@@ -136,6 +136,28 @@ final class ReadinessTests: XCTestCase {
         XCTAssertNil(model.globalNotice)
         await model.stop()
     }
+    @MainActor func testAgentLaunchUsesSelectedFolderOnSelectedMachine() async throws {
+        for kind in ["codex", "claude"] {
+            let machine = Machine(id: "remote-test", label: "Test Mac", target: "test@example.invalid")
+            let suite = "herdrorb-folder-" + UUID().uuidString
+            let preferences = UserDefaults(suiteName: suite)!
+            preferences.set(false, forKey: "saveConversations")
+            defer { preferences.removePersistentDomain(forName: suite) }
+            let transport = LaunchFixture()
+            let model = BubbleModel(cache: ConversationCache(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)), preferences: preferences,
+                probeAgents: { _ in AgentAvailability(codex: true, claude: true) },
+                discover: { [machine] }, makeTransport: { _ in transport })
+            await model.start()
+            for _ in 0..<50 where model.connection[machine.id] != .online { try await Task.sleep(nanoseconds: 10_000_000) }
+            let folder = "/projects/Client's app \n"
+            await model.launch(kind: kind, machine: machine, directory: folder)
+            let recorded = await transport.launchArguments
+            XCTAssertEqual(recorded.0, folder, "The selected directory must reach tab.create unchanged")
+            XCTAssertEqual(recorded.1, kind)
+            XCTAssertEqual(recorded.2, "p", "Agent must start in the pane created with that directory")
+            await model.stop()
+        }
+    }
     func testClaudeAndCodexParserFixtures() {
         for kind in ["codex", "claude"] {
             let messages = TerminalPresentation.messages("› Please review this sample.\n\n• Here is a safe example response.", kind: kind)
@@ -149,6 +171,7 @@ private actor LaunchFixture: HerdrConnection {
     var creations = 0
     var starts = 0
     var running = false
+    var launchArguments: (String?, String?, String?) = (nil, nil, nil)
     func request(_ method: String, _ params: [String: Any], timeout: TimeInterval) async throws -> [String: Any] {
         switch method {
         case "session.snapshot":
@@ -156,8 +179,10 @@ private actor LaunchFixture: HerdrConnection {
                 "panes": creations == 0 ? [] : [["pane_id": "p", "terminal_id": "t", "tab_id": "tab"]],
                 "agents": running ? [["pane_id": "p", "agent": "codex", "agent_status": "idle"]] : [],
                 "tabs": [["tab_id": "tab", "label": "Recovery fixture"]]]]
-        case "tab.create": creations += 1; return ["root_pane": ["pane_id": "p"]]
+        case "tab.create": launchArguments.0 = params["cwd"] as? String; creations += 1; return ["root_pane": ["pane_id": "p"]]
         case "agent.start":
+            launchArguments.1 = params["kind"] as? String
+            launchArguments.2 = params["pane_id"] as? String
             starts += 1
             if starts == 1 { throw RPCError(code: "agent_not_ready", message: "Sign-in required") }
             running = true; return [:]
