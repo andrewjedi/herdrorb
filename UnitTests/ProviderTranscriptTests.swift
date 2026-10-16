@@ -136,3 +136,92 @@ extension ProviderTranscriptTests {
         XCTAssertEqual(cursor?.offset, UInt64(data.count + next.count))
     }
 }
+
+extension ProviderTranscriptTests {
+    func testCodexToolResultUpdatesSameActivityAcrossReadCheckpoints() throws {
+        var data = try record(["type": "session_meta", "payload": ["id": sid]])
+        data += try codex(["type": "message", "role": "user", "content": [["type": "input_text", "text": "Run checks"]]], ordinal: 1)
+        data += try codex(["type": "function_call", "name": "exec_command", "call_id": "call-1", "arguments": "{\"cmd\":\"swift test\"}"], ordinal: 2)
+        let reference = ProviderSessionReference(agent: "codex", kind: "id", value: sid)
+        let first = try ProviderTranscriptDecoder.decode(chunk(data), reference: reference, previous: TranscriptCursor())
+        let call = try XCTUnwrap(first.messages.last?.1)
+        XCTAssertEqual(call.activity?.kind, .command)
+        XCTAssertEqual(call.activity?.title, "swift test")
+        XCTAssertEqual(call.activity?.status, .running)
+        let restored = try JSONDecoder().decode(TranscriptCursor.self, from: JSONEncoder().encode(first.cursor))
+        let output = try codex(["type": "function_call_output", "call_id": "call-1", "output": "Process exited with code 1\nA check failed."], ordinal: 3)
+        let final = try ProviderTranscriptDecoder.decode(chunk(output, offset: UInt64(data.count)), reference: reference, previous: restored)
+        XCTAssertEqual(final.messages.first?.1.id, call.id)
+        XCTAssertEqual(final.messages.first?.1.activity?.status, .failed)
+        XCTAssertEqual(final.messages.first?.1.activity?.exitCode, 1)
+        XCTAssertTrue(final.messages.first?.1.text.contains("A check failed") == true)
+        XCTAssertTrue(final.cursor.pendingTools?.isEmpty == true)
+    }
+    func testClaudeRetainsToolOrderAndKeepsOutputsOutOfUserBubbles() throws {
+        var data = try record(["type": "user", "sessionId": sid, "uuid": "u", "message": ["content": "Edit this file"]])
+        data += try record(["type": "assistant", "sessionId": sid, "uuid": "a", "message": ["content": [
+            ["type": "text", "text": "I’ll update it."],
+            ["type": "tool_use", "id": "edit", "name": "Edit", "input": ["file_path": "/project/main.swift", "old_string": "old", "new_string": "new"]],
+            ["type": "text", "text": "Then check it."],
+            ["type": "thinking", "thinking": "private reasoning"]
+        ]]])
+        data += try record(["type": "user", "sessionId": sid, "uuid": "r", "message": ["content": [
+            ["type": "tool_result", "tool_use_id": "edit", "content": "Saved", "is_error": false]
+        ]]])
+        let batch = try ProviderTranscriptDecoder.decode(chunk(data), reference: .init(agent: "claude", kind: "id", value: sid), previous: TranscriptCursor())
+        let original = batch.messages.filter { $0.1.activity?.status != .completed }
+        XCTAssertEqual(original.map { $0.1.id }, ["claude:u", "claude:a", "claude:tool:edit", "claude:a:text:1"])
+        XCTAssertEqual(original.map(\.0), original.map(\.0).sorted())
+        XCTAssertEqual(batch.messages.filter { $0.1.fromUser }.count, 1)
+        XCTAssertFalse(batch.messages.contains { $0.1.text.contains("private reasoning") })
+        let result = try XCTUnwrap(batch.messages.last?.1.activity)
+        XCTAssertEqual(result.status, .completed)
+        XCTAssertTrue(result.diff?.contains("-old\n+new") == true)
+        XCTAssertEqual(result.file, "/project/main.swift")
+    }
+    func testToolCompletionRetainsArchivePositionAndIsReplayIdempotent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let archive = ConversationArchive(directory: directory)
+        var tool = SessionMessage(id: "tool", fromUser: false, text: "Running", activity: .init(kind: .command, title: "test", input: "test"))
+        let answer = SessionMessage(id: "answer", fromUser: false, text: "Done")
+        try await archive.apply([(1, tool), (2, answer)], session: "s")
+        tool.activity?.status = .completed; tool.text = "Passed"
+        try await archive.apply([(3, tool), (3, tool)], session: "s")
+        let page = try await archive.page(session: "s")
+        XCTAssertEqual(page.messages.map(\.id), ["tool", "answer"])
+        XCTAssertEqual(page.messages.first?.activity?.status, .completed)
+        XCTAssertEqual(page.total, 2)
+    }
+    func testLegacyMessageDecodesWithoutNewPresentationFields() throws {
+        let data = Data(#"{"id":"old","fromUser":false,"text":"Preserved","parts":[],"artifacts":[]}"#.utf8)
+        let message = try JSONDecoder().decode(SessionMessage.self, from: data)
+        XCTAssertEqual(message.text, "Preserved")
+        XCTAssertNil(message.activity)
+        XCTAssertNil(message.createdAt)
+    }
+}
+
+extension ProviderTranscriptTests {
+    func testEmptyProviderFileKeepsSavedRowsUntilValidatedReplay() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent(sid + ".jsonl")
+        try Data().write(to: file)
+        let archive = ConversationArchive(directory: directory.appendingPathComponent("cache"))
+        let agent = Agent(terminal_id: "t", agent: "codex", agent_status: "idle", pane_id: "p", providerSession: .init(agent: "codex", kind: "path", value: file.path))
+        let key = ConversationCache.key(for: agent)
+        try await archive.apply([(0, SessionMessage(id: "cached", fromUser: false, text: "Retained reply"))], session: key)
+        let reader = ProviderTranscriptReader(archive: archive)
+        let pending = try await reader.refresh(agent: agent, machine: .local)
+        XCTAssertEqual(pending.page?.messages.first?.text, "Retained reply")
+        XCTAssertTrue(pending.catchingUp)
+        var data = try record(["type": "session_meta", "payload": ["id": sid]])
+        data += try codex(["type": "message", "role": "assistant", "content": [["type": "output_text", "text": "Canonical reply"]]], ordinal: 1)
+        try data.write(to: file)
+        let complete = try await reader.refresh(agent: agent, machine: .local)
+        XCTAssertEqual(complete.page?.messages.map(\.text), ["Canonical reply"])
+        XCTAssertFalse(complete.catchingUp)
+    }
+}

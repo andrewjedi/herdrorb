@@ -25,6 +25,8 @@ struct ComposerControls: View {
     var onRefresh: (() -> Void)? = nil
 
     var onRestartClaude: ((Bool) -> Void)? = nil
+    var settingsRequest = 0
+    var accessRequest = 0
 
     @State private var showingAccess = false
     @State private var showingSettings = false
@@ -36,6 +38,8 @@ struct ComposerControls: View {
         }
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
+        .onChange(of: settingsRequest) { _, _ in if showsModel && enabled { showingSettings = true } }
+        .onChange(of: accessRequest) { _, _ in if showsAccess && enabled { showingAccess = true } }
         .onChange(of: showingAccess) { _, open in
             if open && (accessOptions.isEmpty || access == nil) && !applying { onRefresh?() }
         }
@@ -179,6 +183,13 @@ private enum ComposerAccessChoice: String, CaseIterable {
 
 enum ComposerLabels {
     static func model(_ value: String) -> String {
+        if value.lowercased().hasPrefix("claude-") {
+            let parts = value.lowercased().replacingOccurrences(of: "[1m]", with: "").split(separator: "-").dropFirst()
+            if let family = parts.first(where: { ["opus", "sonnet", "haiku", "fable"].contains(String($0)) }) {
+                let version = parts.filter { $0.count <= 2 && $0.allSatisfy(\.isNumber) }.joined(separator: ".")
+                return family.capitalized + (version.isEmpty ? "" : " " + version) + (value.lowercased().contains("[1m]") ? " (1M)" : "")
+            }
+        }
         guard value.lowercased().hasPrefix("gpt-") else { return value }
         let parts = value.split(separator: "-")
         return parts.enumerated().map { index, part in

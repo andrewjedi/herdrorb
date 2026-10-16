@@ -27,7 +27,7 @@ After the CLI reports its identity, the app keeps provider sessions separate eve
 
 ## What the data means
 
-Provider transcripts are an observation source, not an agent-control protocol. Persisted message records may arrive in chunks at the end of a model/tool step rather than character by character. The app preserves original Markdown and user/assistant roles; tool results, developer instructions, sidechain messages, and private thinking blocks are not displayed as chat messages.
+Provider transcripts are an observation source, not an agent-control protocol. Persisted message records may arrive in chunks at the end of a model/tool step rather than character by character. The app preserves original Markdown and user/assistant roles. Tool calls and results are normalized into dedicated activity items with stable call IDs, inputs, outputs, status, timestamps, and file/diff metadata where supplied. Tool results never become user bubbles. Developer instructions, sidechain messages, and private thinking blocks remain excluded. The presentation groups commentary and tool activity for both providers while preserving final answers. Persisted activity is an observation of the existing CLI, not a new agent-control connection.
 
 Codex reads `last_token_usage.total_tokens` and `model_context_window`; cumulative lifetime tokens are ignored. Its percentage follows the current Codex baseline normalization (12,000 tokens). [Codex protocol source](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs).
 
@@ -86,3 +86,28 @@ The model popover now offers “Restart Claude and refresh models.” The bridge
 When Bypass is not already confirmed available, its Permissions row explicitly says it will restart and resume the chat. That action launches with the Bypass flags; Claude's own acceptance screen remains an explicit user choice. A normal model refresh does not enable Bypass. Once Bypass is observed active, it stays selectable after switching back to Manual within the app session.
 
 Live verification on Grogu: the old process was 2.1.80 while the installed executable was 2.1.282. Resuming the exact saved conversation exposed Fable 5.1, Opus 5.5, Sonnet 5, and the other CLI model rows. Verified the original messages and Manual mode after restart; no model request or Bypass acceptance was submitted during verification.
+
+## Shared conversation renderer
+
+Swift Markdown supplies CommonMark/GFM parsing, including nested lists, task lists,
+quotes, heading levels, and tables. Native views own block layout. Bundled
+highlight.js grammars run locally in JavaScriptCore with source passed as data.
+Code keeps copy/wrap controls and falls back to plain text for unknown languages.
+Long replies use the same formatted blocks in a paged reader. The composer uses
+TextKit's measured height and keeps settings below the editor.
+
+The transcript presentation version triggers a one-time replay from the verified
+provider file to populate activity records in an existing archive. Messages and
+checkpoints commit together; an empty or incomplete unvalidated file cannot clear
+retained messages. Existing message JSON remains decodable. SQLite session indexes
+use the same SHA-256 keys as the cache files; existing clear-text indexes migrate
+atomically with their checkpoints.
+
+Recognized live permission menus can appear as inline request cards for either
+provider. This path requires Herdr's blocked state, validates the same current
+screen immediately before a choice, and sends one Up/Down/Enter key sequence.
+An uncertain send suppresses that request until its screen changes; the user can
+inspect Terminal. It never submits a draft or automatically chooses permission.
+Unknown or changed menus continue through Terminal. This does not introduce
+Codex app-server or Claude SDK ownership of existing Herdr sessions; live display
+cadence continues to depend on when the CLI persists its transcript.

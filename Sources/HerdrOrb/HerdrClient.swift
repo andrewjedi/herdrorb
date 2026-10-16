@@ -100,13 +100,15 @@ struct PendingMessage: Identifiable, Equatable {
     // Raw terminal spinners/footer changes are not conversation view updates.
     var output = "" {
         didSet {
-            let setup = TerminalSetupScreen.parse(output)
+            let setup = ConversationApproval.parse(output, provider: nil) == nil ? TerminalSetupScreen.parse(output) : nil
             if terminalSetup != setup { terminalSetup = setup }
             let next = TerminalPresentation.activityNotice(output, status: "working")
             if activityMessage != next { activityMessage = next }
         }
     }
     @Published var terminalSetup: TerminalSetupScreen?
+    @Published var approval: ConversationApproval?
+    var uncertainApproval: ConversationApproval?
     var history = ""
     @Published var contextUsage: ContextUsage?
     @Published var transcriptNotice: String?
@@ -453,6 +455,14 @@ struct PendingMessage: Identifiable, Equatable {
         if state.messages.isEmpty { state.reading = true }
         defer { state.liveReadInFlight = false; if state.reading { state.reading = false } }
         do {
+            if agent.agent_status == "blocked" {
+                let result = try await transport.call("pane.read", ["pane_id": agent.pane_id, "source": "visible", "format": "text", "strip_ansi": true])
+                try Task.checkCancellation()
+                let text = (result["read"] as? [String: Any])?["text"] as? String ?? ""
+                let approval = ConversationApproval.parse(text, provider: agent.agent)
+                if state.uncertainApproval != approval { state.uncertainApproval = nil }
+                state.approval = approval == state.uncertainApproval ? nil : approval
+            } else { state.approval = nil; state.uncertainApproval = nil }
             if agent.providerSession != nil, Date().timeIntervalSince(state.lastProviderAttempt) > (state.structuredHistory ? 0 : 5) {
                 state.lastProviderAttempt = Date()
                 do {
@@ -695,8 +705,8 @@ struct PendingMessage: Identifiable, Equatable {
     func composerChanged(_ agent: Agent, text: String) {
         let state = state(agent)
         state.draft = text; persist(agent)
-        if !state.terminal && Self.isSlashCommand(text) { openSlashCommands(agent, text: text, fromDraft: true) }
-        else if state.terminalSeedFromDraft && !state.terminalConnected { state.terminalSeed = text }
+        // Typing is local. Only choosing or submitting a command may change views.
+        if state.terminalSeedFromDraft && !state.terminalConnected { state.terminalSeed = text }
     }
     func openSlashCommands(_ agent: Agent, text: String = "/", fromDraft: Bool = false, submit: Bool = false) {
         let state = state(agent)
@@ -823,10 +833,35 @@ struct PendingMessage: Identifiable, Equatable {
             session.notice = nil
         } catch { session.notice = "Terminal input was not confirmed. Check Terminal before retrying." }
     }
-    func interrupt() async {
-        guard let agent = selected, canInteract(agent), let transport = transports[agent.machineID] else { return }
+    func interrupt(to target: Agent? = nil) async {
+        guard let agent = target ?? selected, canInteract(agent), let transport = transports[agent.machineID] else { return }
         do { _ = try await transport.call("pane.send_keys", ["pane_id": agent.pane_id, "keys": ["ctrl+c"]]) }
         catch { state(agent).notice = error.localizedDescription }
+    }
+    func respondToApproval(_ agent: Agent, choice: Int) async {
+        let session = state(agent)
+        guard canInteract(agent), needsTerminalResponse(agent), !session.busy, !session.settingsBusy,
+              let approval = session.approval, let keys = approval.keys(for: choice),
+              let transport = transports[agent.machineID] else { return }
+        session.busy = true
+        defer { session.busy = false }
+        do {
+            let result = try await transport.call("pane.read", ["pane_id": agent.pane_id, "source": "visible", "format": "text", "strip_ansi": true])
+            let text = (result["read"] as? [String: Any])?["text"] as? String ?? ""
+            guard ConversationApproval.parse(text, provider: agent.agent) == approval else {
+                session.approval = ConversationApproval.parse(text, provider: agent.agent)
+                session.notice = "The request changed. Review the current options before responding."
+                return
+            }
+            do {
+                // One explicit user choice, one key submission, no automatic retries.
+                _ = try await transport.call("pane.send_keys", ["pane_id": agent.pane_id, "keys": keys])
+                session.approval = nil; session.notice = nil
+            } catch {
+                session.uncertainApproval = approval; session.approval = nil
+                session.notice = "Response not confirmed. Check Terminal before choosing again."
+            }
+        } catch { session.notice = "Couldn’t verify the current request. Open Terminal to respond." }
     }
     func deleteSession(_ agent: Agent) async {
         guard canInteract(agent), let transport = transports[agent.machineID] else { return }

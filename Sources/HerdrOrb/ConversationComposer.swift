@@ -10,6 +10,10 @@ struct ConversationComposer: View {
     @State private var dictationPrefix = ""
     @State private var dictationDraft = ""
     @State private var dictationTask: Task<Void, Never>?
+    @State private var editorHeight: CGFloat = 38
+    @State private var editorFocused = false
+    @State private var settingsRequest = 0
+    @State private var accessRequest = 0
 
     private var settings: CodexSessionSettings { agent.agent == "claude" ? session.claudeSettings : session.codexSettings }
     private var settingsAttempted: Bool { agent.agent == "claude" ? session.claudeSettingsLoadAttempted : session.settingsLoadAttempted }
@@ -19,57 +23,28 @@ struct ConversationComposer: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            GeometryReader { geometry in
-                HStack(spacing: 7) {
-                    if ["codex", "claude"].contains(agent.agent) {
-                        controls(access: true, compact: geometry.size.width < 600).fixedSize()
-                        Rectangle().fill(OrbTheme.controlEdge.opacity(0.6)).frame(width: 1, height: 24)
+            if BubbleModel.isSlashCommand(session.draft) { commandMenu }
+            VStack(alignment: .leading, spacing: 5) {
+                ZStack(alignment: .topLeading) {
+                    if session.draft.isEmpty {
+                        Text(dictation.isRecording ? "Listening…" : "Ask \(agent.kind) to do anything…")
+                            .font(.system(size: 14.5)).foregroundStyle(OrbTheme.muted)
+                            .padding(.leading, 5).padding(.top, 5).allowsHitTesting(false)
                     }
-                    ZStack(alignment: .topLeading) {
-                        if session.draft.isEmpty {
-                            Text(dictation.isRecording ? "Listening…" : "Do anything")
-                                .font(.system(size: 14)).foregroundStyle(OrbTheme.muted)
-                                .padding(.leading, 5).padding(.top, 5).allowsHitTesting(false)
-                        }
-                        MessageComposer(text: Binding(get: { session.draft }, set: { text in
-                            if dictation.isRecording || dictation.isPreparing || dictation.isFinishing { endDictation() }
-                            model.composerChanged(agent, text: text)
-                        }), placeholder: "Message \(agent.kind)") { send() }
-                            .id(agent.id)
-                    }.frame(minWidth: 80, maxWidth: .infinity).frame(height: editorHeight)
-                    if ["codex", "claude"].contains(agent.agent) {
-                        controls(access: false, compact: geometry.size.width < 600).fixedSize()
-                    }
-                    Button {
-                        if dictation.isPreparing { endDictation() }
-                        else if dictation.isRecording { dictation.stop() }
-                        else {
-                            acceptingDictationUpdates = true
-                            dictationPrefix = session.draft
-                            dictationDraft = session.draft
-                            dictationTask = Task { await dictation.start() }
-                        }
-                    } label: {
-                        ZStack {
-                            if dictation.isPreparing || dictation.isFinishing { ProgressView().controlSize(.small) }
-                            else { Image(systemName: dictation.isRecording ? "stop.fill" : "mic").font(.system(size: 14, weight: .medium)) }
-                        }.frame(width: 26, height: 28)
-                            .foregroundStyle(dictation.isRecording ? Color(hex: 0xFF986C) : OrbTheme.text)
-                            .background(dictation.isRecording ? Color(hex: 0xFF986C).opacity(0.13) : .clear, in: Circle())
-                    }.buttonStyle(.plain).disabled(dictation.isFinishing)
-                        .help(dictation.isRecording ? "Finish dictation" : "Dictate a message")
-                        .accessibilityLabel(dictation.isPreparing ? "Cancel microphone request" : dictation.isRecording ? "Finish dictation" : "Dictate a message")
-                    Button(action: send) {
-                        Image(systemName: session.busy ? "hourglass" : "arrow.up")
-                            .font(.system(size: 14, weight: .medium)).foregroundStyle(OrbTheme.text)
-                            .frame(width: 24, height: 24)
-                            .background(OrbTheme.selectionEdge.opacity(canSend ? 1 : 0.55), in: Circle())
-                    }.buttonStyle(.plain).disabled(!canSend)
-                        .accessibilityLabel(session.busy ? "Sending message" : "Send message")
-                }.padding(.horizontal, 10).padding(.vertical, 9)
-            }.frame(height: editorHeight + 18)
-                .background(OrbTheme.raised.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(OrbTheme.controlEdge.opacity(0.65), lineWidth: 0.75))
+                    MessageComposer(text: Binding(get: { session.draft }, set: { text in
+                        if dictation.isRecording || dictation.isPreparing || dictation.isFinishing { endDictation() }
+                        model.composerChanged(agent, text: text)
+                    }), placeholder: "Message \(agent.kind)", onHeightChange: { height in
+                        if abs(editorHeight - height) > 0.5 { editorHeight = height }
+                    }, onFocusChange: { editorFocused = $0 }) { send() }
+                        .id(agent.id)
+                }.frame(height: editorHeight).padding(.horizontal, 11).padding(.top, 8)
+                GeometryReader { geometry in
+                    footer(compact: geometry.size.width < 540)
+                }.frame(height: 30).padding(.horizontal, 9).padding(.bottom, 7)
+            }
+            .background(OrbTheme.surface, in: RoundedRectangle(cornerRadius: 13))
+            .overlay(RoundedRectangle(cornerRadius: 13).stroke(editorFocused ? OrbTheme.accent.opacity(0.6) : OrbTheme.controlEdge.opacity(0.65), lineWidth: 0.75))
             if let error = dictation.error {
                 Text(error).font(.system(size: 12)).foregroundStyle(OrbTheme.warning)
                     .fixedSize(horizontal: false, vertical: true)
@@ -81,7 +56,9 @@ struct ConversationComposer: View {
                     Button("Cancel") { session.draft = dictationPrefix; model.persist(agent); endDictation() }.buttonStyle(.plain)
                 }.font(.system(size: 12)).foregroundStyle(OrbTheme.secondary)
             }
-        }.frame(maxWidth: .infinity).padding(.horizontal, 18).padding(.top, 8).padding(.bottom, 16)
+        }.frame(maxWidth: 780).padding(.horizontal, 28).frame(maxWidth: .infinity)
+            .padding(.top, 8).padding(.bottom, 16)
+            .onChange(of: agent.id) { _, _ in editorHeight = 38; editorFocused = false }
             .task(id: agent.id + (agent.agent ?? "")) { if ["codex", "claude"].contains(agent.agent), !settingsAttempted { await model.refreshAgentSettings(agent) } }
             .onChange(of: dictation.transcript) { _, text in
                 guard acceptingDictationUpdates, !text.isEmpty else { return }
@@ -100,8 +77,73 @@ struct ConversationComposer: View {
             .onReceive(model.$panelVisible) { if !$0 { endDictation() } }
             .onDisappear { endDictation() }
     }
-    private var editorHeight: CGFloat {
-        CGFloat(min(4, max(1, session.draft.components(separatedBy: .newlines).count))) * 20 + 8
+    private var working: Bool { agent.agent_status == "working" }
+    private func footer(compact: Bool) -> some View {
+        HStack(spacing: 4) {
+            if ["codex", "claude"].contains(agent.agent) {
+                controls(access: false, compact: compact).fixedSize()
+                controls(access: true, compact: compact).fixedSize()
+            }
+            Spacer(minLength: 6)
+            Button {
+                if dictation.isPreparing { endDictation() }
+                else if dictation.isRecording { dictation.stop() }
+                else {
+                    acceptingDictationUpdates = true; dictationPrefix = session.draft; dictationDraft = session.draft
+                    dictationTask = Task { await dictation.start() }
+                }
+            } label: {
+                ZStack {
+                    if dictation.isPreparing || dictation.isFinishing { ProgressView().controlSize(.mini) }
+                    else { Image(systemName: dictation.isRecording ? "stop.fill" : "mic").font(.system(size: 13)) }
+                }.frame(width: 26, height: 28)
+                    .foregroundStyle(dictation.isRecording ? OrbTheme.danger : OrbTheme.secondary)
+            }.buttonStyle(.plain).disabled(dictation.isFinishing)
+                .help(dictation.isRecording ? "Finish dictation" : "Dictate a message")
+                .accessibilityLabel(dictation.isRecording ? "Finish dictation" : "Dictate a message")
+            Button {
+                if working { Task { await model.interrupt(to: agent) } }
+                else { send() }
+            } label: {
+                Image(systemName: working ? "stop.fill" : session.busy ? "ellipsis" : "arrow.up")
+                    .font(.system(size: working ? 10 : 13, weight: .semibold))
+                    .foregroundStyle(working || canSend ? OrbTheme.canvas : OrbTheme.muted)
+                    .frame(width: 28, height: 28)
+                    .background(working || canSend ? OrbTheme.accent : OrbTheme.raised, in: RoundedRectangle(cornerRadius: 8))
+            }.buttonStyle(.plain).disabled(working ? !model.canInteract(agent) || session.settingsBusy : !canSend)
+                .help(working ? "Stop \(agent.kind)" : "Send message · Return")
+                .accessibilityLabel(working ? "Stop response" : "Send message")
+        }
+    }
+    private var commandMenu: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach([("/model", "Model & effort", "slider.horizontal.3"),
+                     ("/permissions", "Permissions", "shield"),
+                     ("/compact", "Compact in Terminal", "arrow.down.right.and.arrow.up.left"),
+                     ("/", "All commands in Terminal", "terminal")].filter {
+                $0.0 == "/" || $0.0.hasPrefix(session.draft.lowercased())
+            }, id: \.0) { command in
+                Button { executeCommand(command.0) } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: command.2).frame(width: 18)
+                        Text(command.1)
+                        Spacer()
+                        Text(command.0).font(.system(size: 11, design: .monospaced)).foregroundStyle(OrbTheme.muted)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.buttonStyle(OrbButtonStyle(kind: .quiet, compact: true))
+            }
+        }.disabled(!model.canInteract(agent) || session.settingsBusy || working)
+            .padding(7).background(OrbTheme.surface, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(OrbTheme.line, lineWidth: 0.75))
+    }
+    private func executeCommand(_ command: String) {
+        switch command {
+        case "/model", "/permissions":
+            session.draft = ""; model.persist(agent)
+            if command == "/model" { settingsRequest += 1 } else { accessRequest += 1 }
+        default:
+            model.openSlashCommands(agent, text: command == "/" ? session.draft : command, fromDraft: true, submit: command != "/")
+        }
     }
     private func controls(access: Bool, compact: Bool) -> some View {
         ComposerControls(provider: agent.agent ?? "", showsAccess: access, showsModel: !access, compactOnly: compact,
@@ -112,7 +154,8 @@ struct ConversationComposer: View {
             applying: session.settingsBusy, onAccess: { change("access", $0) }, onModel: { change("model", $0) },
             onEffort: { change("effort", $0) }, onSpeed: { change("speed", $0) },
             onRefresh: { Task { await model.refreshAgentSettings(agent) } },
-            onRestartClaude: agent.agent == "claude" ? { bypass in Task { await model.restartClaude(agent, bypass: bypass) } } : nil)
+            onRestartClaude: agent.agent == "claude" ? { bypass in Task { await model.restartClaude(agent, bypass: bypass) } } : nil,
+            settingsRequest: settingsRequest, accessRequest: accessRequest)
     }
     private func change(_ key: String, _ value: String) {
         Task { await model.updateAgentSetting(agent, key: key, value: value) }
@@ -125,6 +168,7 @@ struct ConversationComposer: View {
     private func send() {
         guard canSend else { return }
         endDictation()
+        if ["/model", "/permissions"].contains(session.draft.lowercased()) { executeCommand(session.draft.lowercased()); return }
         Task { await model.send(to: agent) }
     }
 }

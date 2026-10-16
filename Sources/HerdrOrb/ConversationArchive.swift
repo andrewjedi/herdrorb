@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import CryptoKit
 
 /// Incremental, indexed message storage. All SQLite and encoding work is off the UI actor.
 actor ConversationArchive {
@@ -24,11 +25,45 @@ actor ConversationArchive {
             path = directory.appendingPathComponent("messages.sqlite").path
         } else { path = ":memory:" }
         guard sqlite3_open(path, &db) == SQLITE_OK else { throw failure() }
+        var ready = false
+        defer { if !ready { sqlite3_close(db); db = nil } }
         if persistent { try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path) }
         try execute("PRAGMA journal_mode=DELETE")
         try execute("CREATE TABLE IF NOT EXISTS messages (session TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, body BLOB NOT NULL, text TEXT NOT NULL, PRIMARY KEY(session,id))")
         try execute("CREATE INDEX IF NOT EXISTS message_order ON messages(session,position)")
         try execute("CREATE TABLE IF NOT EXISTS cursors (session TEXT PRIMARY KEY, body BLOB NOT NULL)")
+        // Use the same opaque session keys as the JSON cache. Upgrade legacy keys
+        // atomically so provider identities need not be stored as clear-text indexes.
+        let version = try statement("PRAGMA user_version")
+        let needsMigration = sqlite3_step(version) == SQLITE_ROW && sqlite3_column_int(version, 0) == 0
+        sqlite3_finalize(version)
+        if needsMigration {
+            try execute("BEGIN IMMEDIATE")
+            do {
+                let keys = try statement("SELECT session FROM messages UNION SELECT session FROM cursors")
+                var sessions: [String] = []
+                while true {
+                    let status = sqlite3_step(keys)
+                    if status == SQLITE_DONE { break }
+                    guard status == SQLITE_ROW else { sqlite3_finalize(keys); throw failure() }
+                    if let key = sqlite3_column_text(keys, 0) { sessions.append(String(cString: key)) }
+                }
+                sqlite3_finalize(keys)
+                for session in sessions {
+                    for table in ["messages", "cursors"] {
+                        let update = try statement("UPDATE " + table + " SET session=? WHERE session=?")
+                        bind(Self.storageKey(session), to: update, at: 1); bind(session, to: update, at: 2)
+                        let status = sqlite3_step(update); sqlite3_finalize(update)
+                        guard status == SQLITE_DONE else { throw failure() }
+                    }
+                }
+                try execute("PRAGMA user_version=1"); try execute("COMMIT")
+            } catch { try? execute("ROLLBACK"); throw error }
+        }
+        ready = true
+    }
+    static func storageKey(_ session: String) -> String {
+        SHA256.hash(data: Data(session.utf8)).map { String(format: "%02x", $0) }.joined()
     }
     private func failure() -> Error { BridgeError.message("Conversation archive: " + (db.map { String(cString: sqlite3_errmsg($0)) } ?? "could not open storage")) }
     private func statement(_ sql: String) throws -> OpaquePointer {
@@ -49,27 +84,35 @@ actor ConversationArchive {
     }
     func cursor(for session: String) throws -> TranscriptCursor? {
         try open()
+        let sessionKey = Self.storageKey(session)
         let query = try statement("SELECT body FROM cursors WHERE session=?"); defer { sqlite3_finalize(query) }
-        bind(session, to: query, at: 1)
+        bind(sessionKey, to: query, at: 1)
         guard sqlite3_step(query) == SQLITE_ROW else { return nil }
         return try JSONDecoder().decode(TranscriptCursor.self, from: data(query, column: 0))
     }
     /// Commit messages and the byte checkpoint together: a crash can replay, never skip.
-    func apply(_ messages: [(Int64, SessionMessage)], session: String, cursor: TranscriptCursor? = nil) throws {
+    func apply(_ messages: [(Int64, SessionMessage)], session: String, cursor: TranscriptCursor? = nil, reset: Bool = false) throws {
+        let sessionKey = Self.storageKey(session)
         try open(); try execute("BEGIN IMMEDIATE")
         do {
+            if reset {
+                let remove = try statement("DELETE FROM messages WHERE session=?")
+                bind(sessionKey, to: remove, at: 1)
+                let status = sqlite3_step(remove); sqlite3_finalize(remove)
+                guard status == SQLITE_DONE else { throw failure() }
+            }
             let insert = try statement("INSERT INTO messages(session,id,position,body,text) VALUES(?,?,?,?,?) ON CONFLICT(session,id) DO UPDATE SET body=excluded.body,text=excluded.text WHERE messages.body != excluded.body")
             defer { sqlite3_finalize(insert) }
             for (position, message) in messages {
                 sqlite3_reset(insert); sqlite3_clear_bindings(insert)
-                bind(session, to: insert, at: 1); bind(message.id, to: insert, at: 2)
+                bind(sessionKey, to: insert, at: 1); bind(message.id, to: insert, at: 2)
                 sqlite3_bind_int64(insert, 3, position)
                 bind(try JSONEncoder().encode(message), to: insert, at: 4); bind(message.text, to: insert, at: 5)
                 guard sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
             }
             if let cursor {
                 let save = try statement("INSERT OR REPLACE INTO cursors(session,body) VALUES(?,?)"); defer { sqlite3_finalize(save) }
-                bind(session, to: save, at: 1); bind(try JSONEncoder().encode(cursor), to: save, at: 2)
+                bind(sessionKey, to: save, at: 1); bind(try JSONEncoder().encode(cursor), to: save, at: 2)
                 guard sqlite3_step(save) == SQLITE_DONE else { throw failure() }
             }
             if !persistent {
@@ -90,18 +133,19 @@ actor ConversationArchive {
     }
     func page(session: String, limit: Int = 40, before: String? = nil, search: String = "") throws -> Page {
         try open()
+        let sessionKey = Self.storageKey(session)
         let condition = search.isEmpty ? "session=?" : "session=? AND instr(lower(text),lower(?))>0"
         let count = try statement("SELECT count(*) FROM messages WHERE " + condition); defer { sqlite3_finalize(count) }
-        bind(session, to: count, at: 1); if !search.isEmpty { bind(search, to: count, at: 2) }
+        bind(sessionKey, to: count, at: 1); if !search.isEmpty { bind(search, to: count, at: 2) }
         guard sqlite3_step(count) == SQLITE_ROW else { throw failure() }
         let total = Int(sqlite3_column_int64(count, 0))
         let boundary = before == nil ? "" : " AND position < (SELECT position FROM messages WHERE session=? AND id=?)"
         let query = try statement("SELECT body FROM messages WHERE " + condition + boundary + " ORDER BY position DESC, id DESC LIMIT ?")
         defer { sqlite3_finalize(query) }
         var index: Int32 = 1
-        bind(session, to: query, at: index); index += 1
+        bind(sessionKey, to: query, at: index); index += 1
         if !search.isEmpty { bind(search, to: query, at: index); index += 1 }
-        if let before { bind(session, to: query, at: index); index += 1; bind(before, to: query, at: index); index += 1 }
+        if let before { bind(sessionKey, to: query, at: index); index += 1; bind(before, to: query, at: index); index += 1 }
         sqlite3_bind_int(query, index, Int32(min(max(limit, 1), 200)))
         var messages: [SessionMessage] = []
         var decodedBytes = 0
@@ -120,15 +164,16 @@ actor ConversationArchive {
         if let first = messages.last {
             let older = try statement("SELECT count(*) FROM messages WHERE session=? AND position < (SELECT position FROM messages WHERE session=? AND id=?)")
             defer { sqlite3_finalize(older) }
-            bind(session, to: older, at: 1); bind(session, to: older, at: 2); bind(first.id, to: older, at: 3)
+            bind(sessionKey, to: older, at: 1); bind(sessionKey, to: older, at: 2); bind(first.id, to: older, at: 3)
             if sqlite3_step(older) == SQLITE_ROW { earlier = Int(sqlite3_column_int64(older, 0)) }
         }
         return Page(messages: messages.reversed(), total: total, earlier: earlier)
     }
     func replaceFallback(_ messages: [SessionMessage], session: String) throws {
         try open()
+        let sessionKey = Self.storageKey(session)
         let query = try statement("SELECT coalesce(max(position),0) FROM messages WHERE session=?")
-        bind(session, to: query, at: 1)
+        bind(sessionKey, to: query, at: 1)
         guard sqlite3_step(query) == SQLITE_ROW else { sqlite3_finalize(query); throw failure() }
         var position = sqlite3_column_int64(query, 0)
         sqlite3_finalize(query)

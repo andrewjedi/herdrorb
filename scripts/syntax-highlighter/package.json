@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "scripts": { "build": "node build.mjs" },
+  "devDependencies": { "esbuild": "0.25.0", "highlight.js": "11.11.1" }
+}

@@ -61,6 +61,8 @@ struct ConversationScroll<Content: View>: NSViewRepresentable {
         var rowDocument: ConversationRowDocument?
         private var pendingRows: [ConversationRowEntry]?
         var changed: ((Bool, Double) -> Void)?
+        var latestVisibilityChanged: ((Bool) -> Void)?
+        private var lastAwayFromLatest: Bool?
         var follow = true
         var restored = false
         var initialOffset = 0.0
@@ -142,6 +144,7 @@ struct ConversationScroll<Content: View>: NSViewRepresentable {
             // Resume only after returning down to the actual bottom.
             follow = offset >= gestureStartOffset && document.frame.height - scroll.contentView.bounds.maxY <= 2
             changed?(follow, max(0, offset))
+            reportLatestVisibility(document.frame.height - scroll.contentView.bounds.maxY > 32)
             scheduleLayout(measure: false)
         }
         func scheduleLayout(measure: Bool = true) {
@@ -189,6 +192,12 @@ struct ConversationScroll<Content: View>: NSViewRepresentable {
                 scroll.reflectScrolledClipView(scroll.contentView)
             }
             if prepended { changed?(follow, target) }
+            reportLatestVisibility(maximum - target > 32)
+        }
+        private func reportLatestVisibility(_ away: Bool) {
+            guard lastAwayFromLatest != away else { return }
+            lastAwayFromLatest = away
+            DispatchQueue.main.async { [weak self] in self?.latestVisibilityChanged?(away) }
         }
         func disconnect() {
             scrollSettled?.cancel(); scrollSettled = nil
@@ -225,9 +234,10 @@ final class ConversationScrollView: NSScrollView {
 struct ConversationRowEntry {
     let id: String
     var message: SessionMessage? = nil
+    var messages: [SessionMessage]? = nil
     var state = ""
     let content: () -> AnyView
-    func matches(_ other: Self) -> Bool { id == other.id && message == other.message && state == other.state }
+    func matches(_ other: Self) -> Bool { id == other.id && message == other.message && messages == other.messages && state == other.state }
 }
 
 struct ConversationRows: NSViewRepresentable {
@@ -236,6 +246,7 @@ struct ConversationRows: NSViewRepresentable {
     let version: ConversationContentVersion
     let changed: (Bool, Double) -> Void
     let rows: [ConversationRowEntry]
+    var latestVisibilityChanged: ((Bool) -> Void)? = nil
     func makeCoordinator() -> ConversationScroll<AnyView>.Coordinator { .init() }
     func makeNSView(context: Context) -> ConversationScrollView {
         let scroll = ConversationScrollView()
@@ -254,6 +265,7 @@ struct ConversationRows: NSViewRepresentable {
     func updateNSView(_ scroll: ConversationScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.changed = changed
+        coordinator.latestVisibilityChanged = latestVisibilityChanged
         let followChanged = coordinator.setFollow(follow)
         if !coordinator.restored { coordinator.initialOffset = version.filter.isEmpty ? offset ?? 0 : 0 }
         if coordinator.version != version {

@@ -5,6 +5,13 @@ import SwiftTerm
 /// Isolated, deterministic UI fixtures. These never attach to a terminal, discover
 /// machine profiles, or read project folders. They use the same production views.
 enum DesignPreviewScreen: String, CaseIterable {
+    case claudeApproval = "31-claude-approval"
+    case codeConversation = "25-conversation-code"
+    case tableConversation = "26-conversation-table"
+    case workDetails = "27-conversation-work"
+    case claudeWorkDetails = "28-claude-work"
+    case draftConversation = "29-conversation-draft"
+    case commandConversation = "30-conversation-commands"
     case imageConversation = "18-image-conversation"
     case structuredCodex = "19-structured-codex"
     case structuredClaude = "20-structured-claude"
@@ -89,7 +96,7 @@ struct DemoTerminal: NSViewRepresentable {
         model.machines = [.local, Machine(id: "demo-studio", label: "Studio Mac")]
         model.agents = model.machines.map { machine in
             Agent(terminal_id: "demo-terminal", agent: machine.id == "local" ? "codex" : "claude",
-                  agent_status: screen == .thinking ? "working" : screen == .approval ? "blocked" : "idle", pane_id: "demo-pane", cwd: "~/Projects/herdrorb", machineID: machine.id,
+                  agent_status: screen == .thinking ? "working" : (screen == .approval || screen == .claudeApproval) ? "blocked" : "idle", pane_id: "demo-pane", cwd: "~/Projects/herdrorb", machineID: machine.id,
                   tabLabel: machine.id == "local" ? "Release checklist" : "Documentation", profileIdentity: machine.identity)
         }
         for machine in model.machines {
@@ -109,6 +116,9 @@ struct DemoTerminal: NSViewRepresentable {
             state.restored = true
             state.terminalConnected = true
             state.codexSettings = .preview
+            state.claudeSettings = SessionComposerSettings(access: "manual", model: "claude-sonnet-5", effort: "medium", speed: "standard",
+                models: ["claude-sonnet-5", "claude-opus-5-5"], availableEfforts: ["low", "medium", "high"], accessOptions: ["manual", "acceptEdits", "plan"], speeds: ["standard"])
+            state.settingsLoadAttempted = true; state.claudeSettingsLoadAttempted = true
         }
         model.selected = model.agents.first
         model.selectedMachineID = "local"
@@ -124,19 +134,25 @@ struct DemoTerminal: NSViewRepresentable {
             model.current.output = screen == .claudeLogin
                 ? "Browser didn't open?\nhttps://claude.ai/oauth/authorize?state=fictional-preview\n\nPaste code here if prompted >"
                 : "Select login method:\n❯ 1. Claude account with subscription\n  2. Anthropic Console account\n  3. Third-party platform"
-        case .structuredCodex, .structuredClaude:
-            let provider = screen == .structuredClaude ? "claude" : "codex"
-            model.selected = model.agents[screen == .structuredClaude ? 1 : 0]
+        case .conversation, .structuredCodex, .structuredClaude, .codeConversation, .tableConversation, .workDetails, .claudeWorkDetails, .draftConversation, .commandConversation:
+            let provider = screen == .structuredClaude || screen == .claudeWorkDetails ? "claude" : "codex"
+            model.selected = model.agents[provider == "claude" ? 1 : 0]
             model.selectedMachineID = model.selected!.machineID
-            let answer = "## Saved conversation connected\n\nMessages are recovered from the provider’s saved session, including replies written while the app was hidden.\n\n- Complete messages stay in the archive.\n- Search includes earlier pages.\n- The context meter uses provider usage data."
-            model.current.messages = [
-                SessionMessage(id: "fixture-user", fromUser: true, text: "Keep this long conversation easy to follow.", parts: [.init(text: "Keep this long conversation easy to follow.", status: false)], source: provider),
-                SessionMessage(id: "fixture-reply", fromUser: false, text: answer, parts: [.init(text: answer, status: false)], phase: "final_answer", source: provider)
-            ]
+            model.current.messages = ConversationPreview.messages(provider: provider, screen: screen)
             model.current.structuredHistory = true
-            model.current.earlierMessages = 200
-            model.current.totalMessages = 202
-            model.current.contextUsage = ContextUsage(usedPercent: provider == "codex" ? 28 : 63, source: provider == "codex" ? "Codex session usage" : "Claude status-line telemetry", sessionID: "fictional-demo", model: provider == "codex" ? "gpt-6-astra" : "claude-opus", capacity: 200000, observedAt: Date())
+            model.current.contextUsage = ContextUsage(usedPercent: provider == "codex" ? 28 : 43, source: "Fictional preview", sessionID: "fictional-demo", model: provider, capacity: 200000, observedAt: Date())
+            model.current.follow = false; model.current.scrollOffset = 0
+            if screen == .draftConversation { model.current.draft = "Make the conversation feel calm and readable for both Codex and Claude. Keep code easy to copy, tuck completed work into a small summary, and preserve my reading position as new messages arrive." }
+            if screen == .commandConversation { model.current.draft = "/" }
+            model.current.messageRevision += 1
+        case .approval, .claudeApproval:
+            let provider = screen == .claudeApproval ? "claude" : "codex"
+            model.selected = model.agents[provider == "claude" ? 1 : 0]
+            model.selectedMachineID = model.selected!.machineID
+            model.current.messages = Array(ConversationPreview.messages(provider: provider, screen: .conversation).prefix(2))
+            model.current.structuredHistory = true
+            let marker = provider == "claude" ? "❯" : "›"
+            model.current.approval = ConversationApproval.parse("Bash command\nswift test\nDo you want to proceed?\n\(marker) 1. Yes, run once\n  2. Yes, and don’t ask again for this command\n  3. No, cancel\nPress Enter to confirm · Esc to cancel", provider: provider)
             model.current.messageRevision += 1
         case .imageConversation:
             let file = imageFixtureURL
@@ -297,5 +313,78 @@ private struct PreviewOrbAndArtifact: View {
             }
         }.padding(25).background(OrbTheme.canvas).foregroundStyle(OrbTheme.text).font(OrbTheme.bodyFont)
             .task { artifactURL = try? DesignPreview.artifactFixtureURL() }
+    }
+}
+
+private enum ConversationPreview {
+    static func messages(provider: String, screen: DesignPreviewScreen) -> [SessionMessage] {
+        let start = Date(timeIntervalSince1970: 1_792_102_800)
+        var result = [SessionMessage(id: "preview-user", fromUser: true, text: "Review the release changes and run the checks.",
+                                     source: provider, turnID: "preview-turn", createdAt: start)]
+        result.append(SessionMessage(id: "preview-progress", fromUser: false, text: "I’ll review the changed files and run the test suite.",
+                                     phase: provider == "codex" ? "commentary" : nil, source: provider, turnID: "preview-turn", createdAt: start.addingTimeInterval(2)))
+        let activities: [ConversationActivity] = [
+            .init(kind: .read, title: "Read README.md", input: "{\"file_path\": \"README.md\"}", output: "Installation and release checklist reviewed.", status: .completed, file: "README.md", startedAt: start.addingTimeInterval(3), completedAt: start.addingTimeInterval(4)),
+            .init(kind: .edit, title: "Edit ConnectionSetup.swift", input: "ConnectionSetup.swift", output: "File updated.", status: .completed, file: "ConnectionSetup.swift",
+                  diff: "--- ConnectionSetup.swift\n+++ ConnectionSetup.swift\n@@ -24,3 +24,4 @@\n-    connect()\n+    await connect()\n+    restoreConversation()", startedAt: start.addingTimeInterval(6), completedAt: start.addingTimeInterval(9)),
+            .init(kind: .command, title: "swift test", input: "swift test", output: "Build complete!\nExecuted 93 tests, with 0 failures.\nProcess exited with code 0", status: .completed, exitCode: 0, startedAt: start.addingTimeInterval(10), completedAt: start.addingTimeInterval(24))
+        ]
+        for (index, activity) in activities.enumerated() {
+            result.append(SessionMessage(id: "preview-tool-\(index)", fromUser: false, text: activity.title + "\n" + activity.input + "\n" + (activity.output ?? ""),
+                                         phase: "activity", source: provider, turnID: "preview-turn", createdAt: activity.startedAt, activity: activity))
+        }
+        let answer: String
+        switch screen {
+        case .codeConversation:
+            answer = """
+            ## One conversation, both agents
+
+            The response stays readable while completed work folds above it.
+
+            ```swift
+            struct ConversationTurn {
+                let provider: AgentProvider
+                let items: [ConversationItem]
+
+                var isComplete: Bool {
+                    items.allSatisfy { $0.isComplete }
+                }
+            }
+            ```
+
+            Code keeps its language, formatting, and copy controls.
+            """
+        case .tableConversation:
+            answer = """
+            ## Release verification
+
+            Both agents share the same conversation surface.
+
+            | Check | Codex | Claude |
+            | :--- | :--- | :--- |
+            | Formatted replies | Ready | Ready |
+            | Commands & edits | Ready | Ready |
+            | Saved history | Connected | Connected |
+
+            - [x] Test suite passes
+            - [x] Original conversations preserved
+            - [ ] Review the release notes
+            """
+        case .workDetails, .claudeWorkDetails:
+            answer = "All release checks passed. The updated files are ready to review."
+        default:
+            answer = """
+            The release checks passed.
+
+            - **Codex and Claude** share the same conversation layout.
+            - Completed work stays together, with details a click away.
+            - Your draft and reading position stay with each session.
+
+            The updated files are ready to review.
+            """
+        }
+        result.append(SessionMessage(id: "preview-answer", fromUser: false, text: answer,
+                                     artifacts: [], phase: "final_answer", source: provider, turnID: "preview-turn", createdAt: start.addingTimeInterval(25)))
+        return result
     }
 }

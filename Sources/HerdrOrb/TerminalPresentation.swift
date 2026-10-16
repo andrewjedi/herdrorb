@@ -160,6 +160,9 @@ struct SessionMessage: Identifiable, Equatable, Sendable, Codable {
     var artifacts: [ArtifactReference] = []
     var phase: String? = nil
     var source: String? = nil
+    var turnID: String? = nil
+    var createdAt: Date? = nil
+    var activity: ConversationActivity? = nil
 }
 struct MessagePart: Equatable, Sendable, Codable {
     var text: String

@@ -32,23 +32,40 @@ The comparison viewer is `output/implementation-review/compare.html`, with side-
 
 For native verification, launch the isolated demo with `--panel-only` to hide its orb and `--preview-size 700x460` to exercise minimum dimensions. Preview processes have separate preference suites and clean them up on normal termination, so rendering screenshots cannot change another demo's UI state.
 
-## Conversation activity
+## Conversation presentation
 
-Codex conversations present one collapsed activity disclosure per reply, labelled
-“Thinking…” during work and “Worked for…” when the terminal provides a duration.
-Intermediate commentary, tool calls, and completed approval notices remain
-searchable and expandable. Search reveals matching activity. The final answer
-owns its artifact cards, so temporary files from commands do not clutter the
-conversation. Pending approvals still use the existing terminal handoff.
+Codex and Claude share a provider-neutral timeline. Assistant answers are unboxed
+prose, user messages use restrained trailing bubbles, and the transcript and
+composer share a 780-point reading column. SF Pro body text is 14.5 points;
+operational summaries use 12.5 points and code uses SF Mono at 12.5 points.
 
-This follows the separation of compact status and expanded history in Codex's
-[public status renderer](https://github.com/openai/codex/blob/main/codex-rs/tui/src/status_indicator_widget.rs)
-and [message history](https://github.com/openai/codex/blob/main/codex-rs/tui/src/history_cell/messages.rs).
-It is a presentation of terminal snapshots, not access to structured reasoning;
-unrecognized idle prose is preserved. No transcript or cache data is discarded.
+Completed work folds into one disclosure with action and file counts. Commands,
+reads, searches, plans, and edits have dedicated rows. Failed actions remain
+visible when the group is collapsed. Tool input/output and diffs expand on demand;
+file edits retain access to the existing artifact preview. Provider history keeps
+tool identities and results, while terminal-only presentation remains approximate.
 
-The conversation uses SF Pro at 15 points with 13-point activity labels, neutral
-raised user bubbles, ordinary list bullets, and the existing lavender action
-accent. Short conversations align to the top of the viewport. The activity
-indicator respects Reduce Motion. Preview screens 14 and 15 cover thinking and
-approval states; screen 01 covers the completed, collapsed reply.
+CommonMark/GFM is parsed with Swift Markdown. Native block views handle heading
+levels, nested lists, task lists, quotes, tables, and code. A bundled highlight.js
+engine runs locally in JavaScriptCore; reply content is passed as data and never
+executed. Unsupported languages fall back to plain code. Code can be copied or
+wrapped, and tables can be copied as tab-separated text. Long messages retain a
+bounded chat excerpt and open in a paged, formatted reader.
+
+The composer has a full-width editor above its controls. TextKit measures wrapped
+text, growing the input to a maximum of 132 points before internal scrolling.
+Typing a slash opens a local command palette; choosing model or permissions opens
+the existing native controls. Other commands explicitly hand off to Terminal.
+The Send button becomes Stop while the provider is working.
+
+Recognized Codex and Claude permission menus can be answered inside Conversation.
+The full native option labels and request context remain visible. A response
+revalidates the exact current screen and sends one selection; ambiguous responses
+are never retried. Unknown menus retain the Terminal handoff. Setup and login
+continue to use their existing guarded controls.
+
+Row identity, cached measurements, gesture-aware updates, and offscreen host bounds
+remain in the AppKit scroll layer. The Latest control appears only when there is
+actually newer content below the reader. Syntax coloring and hover metadata do
+not change row geometry. Preview screens 19/20 cover both providers; 25–31 cover
+code, tables, expanded work, wrapped drafts, commands, and permission requests.

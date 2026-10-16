@@ -64,3 +64,24 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Swift Markdown 0.6.0 and Swift cmark-gfm
+
+https://github.com/swiftlang/swift-markdown
+https://github.com/swiftlang/swift-cmark
+
+Swift Markdown is Apache-2.0 licensed with the Swift Runtime Library Exception.
+Swift cmark-gfm includes BSD/MIT-licensed components identified in its COPYING
+file. The complete upstream notices are bundled as SwiftMarkdown-LICENSE and
+SwiftCMark-LICENSE. Exact revisions are pinned in Package.resolved.
+
+## highlight.js 11.11.1
+
+https://github.com/highlightjs/highlight.js
+
+MIT licensed; copyright Ivan Sagalaev and other contributors. The grammar engine
+is bundled with selected languages and runs locally in JavaScriptCore. Its full
+license is included as HighlightJS-LICENSE.txt in the app's resource bundle.
+To rebuild it, run `npm ci --prefix scripts/syntax-highlighter` followed by
+`npm run --prefix scripts/syntax-highlighter build`. No Node.js or network
+connection is required for highlighting in the installed app.

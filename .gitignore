@@ -13,3 +13,5 @@ xcuserdata/
 # Historical local development notes contain private machine names and paths.
 docs/performance-review-2026-09-20.md
 docs/responsiveness-implementation-2026-09-20.md
+
+node_modules/

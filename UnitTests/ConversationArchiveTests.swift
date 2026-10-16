@@ -1,7 +1,36 @@
 import XCTest
+import SQLite3
 @testable import HerdrOrb
 
 final class ConversationArchiveTests: XCTestCase {
+    func testLegacySessionIndexesMigrateWithoutLosingMessagesOrCheckpoints() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("messages.sqlite").path, &database), SQLITE_OK)
+        let message = SessionMessage(id: "original", fromUser: false, text: "Original saved reply")
+        let cursor = TranscriptCursor(path: "/fixture.jsonl", identity: "original-file", offset: 2048, validated: true)
+        let body = try JSONEncoder().encode(message).map { String(format: "%02x", $0) }.joined()
+        let checkpoint = try JSONEncoder().encode(cursor).map { String(format: "%02x", $0) }.joined()
+        let sql = "CREATE TABLE messages(session TEXT NOT NULL,id TEXT NOT NULL,position INTEGER NOT NULL,body BLOB NOT NULL,text TEXT NOT NULL,PRIMARY KEY(session,id)); CREATE TABLE cursors(session TEXT PRIMARY KEY,body BLOB NOT NULL); INSERT INTO messages VALUES('legacy-session','original',1,X'\(body)','Original saved reply'); INSERT INTO cursors VALUES('legacy-session',X'\(checkpoint)');"
+        XCTAssertEqual(sqlite3_exec(database, sql, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(database)
+        let archive = ConversationArchive(directory: directory)
+        let page = try await archive.page(session: "legacy-session")
+        let restoredCursor = try await archive.cursor(for: "legacy-session")
+        XCTAssertEqual(page.messages, [message])
+        XCTAssertEqual(restoredCursor?.offset, 2048)
+        let reopened = ConversationArchive(directory: directory)
+        let secondPage = try await reopened.page(session: "legacy-session")
+        XCTAssertEqual(secondPage.messages, [message], "Opening again must not hash an already migrated index")
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("messages.sqlite").path, &database), SQLITE_OK)
+        var query: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(database, "SELECT session FROM messages", -1, &query, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_step(query), SQLITE_ROW)
+        XCTAssertEqual(String(cString: sqlite3_column_text(query, 0)), ConversationArchive.storageKey("legacy-session"))
+        sqlite3_finalize(query); sqlite3_close(database)
+    }
     func testReplayPagingSearchAndCompleteLargeMessages() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

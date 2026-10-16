@@ -32,8 +32,8 @@ formatted conversation view alongside the live terminal.
 | --- | --- |
 | **A living galaxy orb** | Choose Nebula, Aurora, or Supernova. Move it around your desktop, switch to a smaller size, or hide it and use the menu bar. The panel unfurls with flowing galaxy light and an optional sound. Reduce Motion uses a short fade. |
 | **Codex + Claude Code** | Keep both agents in one place. Start an agent in a project folder on your chosen device, then switch sessions while keeping each draft and reading position. |
-| **Readable conversations** | Read Markdown, code, and collapsed activity. Connect saved provider history, browse earlier messages, search archived conversations, and open long replies in a separate reader. |
-| **The live terminal, a click away** | Switch to Terminal for approvals, slash commands, interactive menus, and sign-in. Agent permissions remain with the underlying CLI. |
+| **Readable conversations** | Read formatted replies, highlighted code, tables, and collapsible commands and file changes from either agent. Browse and search saved history, and open long replies in a formatted reader. |
+| **The live terminal, a click away** | Use inline controls for recognized permission requests and a command palette, with Terminal available for other menus and sign-in. Agent permissions remain with the underlying CLI. |
 | **Controls in the composer** | Choose permissions, model, reasoning effort, and Fast mode where supported. Changes become active after the connected CLI confirms them. Dictate into your draft and review before sending. |
 | **Devices at a glance** | See Herdr and Tailscale status independently, inspect connection details, and manage executable paths and project defaults per device. |
 | **Direct device terminals** | Open a local shell or SSH terminal from the sidebar, even when Herdr is stopped. You can also launch Herdr in its own embedded terminal. |
@@ -125,7 +125,7 @@ to preview the missing-Herdr setup screen.
 - Click a **device name** for its overview; click its **chevron** to expand sessions. The paired dots show Herdr on the left and Tailscale on the right. Tailscale presence refreshes every 30 seconds while the panel is open; unknown hosts are not treated as offline.
 - Change model and permission settings while the agent is idle. Available choices come from its CLI. Codex Ultra is a reasoning effort, separate from Fast speed; Claude has its own effort levels and permission modes. Claude bypass permissions must be enabled when the session starts. Account or organization restrictions can make Fast unavailable.
 - Click the **microphone** to dictate, stop, and review before sending. macOS requests Microphone and Speech Recognition permission on first use. Dictation stops when the panel closes or you switch conversations.
-- Type **/** to use slash commands in Terminal. Use Terminal for approvals and unfamiliar interactive menus.
+- Type **/** to open the command palette. Model and permissions open native controls; other commands open Terminal. Recognized permission requests can be answered in Conversation; unfamiliar menus remain in Terminal.
 - Click a saved image for a large preview, **Full Screen**, or **Open in Preview**; Escape or Space closes the preview. Native image generation must be available in the connected Codex CLI; herdrorb adds no separate API key or paid fallback.
 - Open a device’s **gear** for diagnostics, a custom Herdr path, agent executable checks, and project defaults. If agent startup fails, inspect its existing terminal before explicitly retrying.
 - **Delete session** asks for confirmation before closing the actual terminal and command. Close direct terminal sessions explicitly to end their shells.

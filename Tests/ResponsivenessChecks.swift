@@ -159,6 +159,8 @@ actor FakeConnection: HerdrConnection {
         await model.choose(first)
         let promptsBeforeSlash = await fast.sends
         model.composerChanged(first, text: "/")
+        assert(!model.current.terminal && model.current.terminalSeed == nil, "Typing a slash must keep the reader in Conversation")
+        model.openSlashCommands(first, text: "/", fromDraft: true)
         assert(model.current.terminal && model.current.commandMode && model.current.terminalSeed == "/")
         assert(model.current.draft == "/", "Keep the draft until the terminal actually accepts the handoff")
         model.composerChanged(first, text: "/model")

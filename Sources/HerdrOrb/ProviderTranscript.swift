@@ -25,6 +25,9 @@ struct TranscriptCursor: Codable, Sendable {
     var turnID: String?
     var usage: ContextUsage?
     var compactedAt: Date? = nil
+    var presentationVersion: Int? = nil
+    var pendingTools: [String: SessionMessage]? = nil
+    var conversationTurnID: String? = nil
 }
 struct TranscriptChunk: Codable, Sendable {
     var path: String
@@ -72,6 +75,7 @@ enum ProviderFiles {
 /// Converts complete JSONL records to UI messages. No terminal-marker parsing or
 /// raw reasoning is used. Byte checkpoints make replay independent of UI visibility.
 enum ProviderTranscriptDecoder {
+    static let presentationVersion = 2
     struct Batch {
         var messages: [(Int64, SessionMessage)] = []
         var cursor: TranscriptCursor
@@ -79,6 +83,7 @@ enum ProviderTranscriptDecoder {
     static func decode(_ chunk: TranscriptChunk, reference: ProviderSessionReference, previous: TranscriptCursor) throws -> Batch {
         var cursor = chunk.offset == previous.offset && chunk.identity == previous.identity ? previous : TranscriptCursor()
         cursor.path = chunk.path; cursor.identity = chunk.identity; cursor.offset = chunk.offset
+        cursor.presentationVersion = presentationVersion
         var batch = Batch(cursor: cursor)
         var start = chunk.data.startIndex
         for end in chunk.data.indices where chunk.data[end] == 10 {
@@ -100,7 +105,8 @@ enum ProviderTranscriptDecoder {
                 // Metadata may precede Claude's first session-scoped record.
                 batch.cursor.offset = chunk.offset + UInt64(start); continue
             }
-            let timestamp = (record["timestamp"] as? String).flatMap(parseDate) ?? Date()
+            let recordedAt = (record["timestamp"] as? String).flatMap(parseDate)
+            let timestamp = recordedAt ?? Date()
             if reference.agent == "codex" {
                 if record["type"] as? String == "turn_context" {
                     batch.cursor.model = payload["model"] as? String
@@ -118,7 +124,16 @@ enum ProviderTranscriptDecoder {
                         return part["text"] as? String
                     }.joined(separator: "\n")
                     let id = payload["id"] as? String ?? "record-\(record["ordinal"] as? Int ?? Int(position))"
-                    if !text.isEmpty { batch.messages.append((Int64(position), message(id: id, text: text, user: role == "user", phase: payload["phase"] as? String, provider: "codex"))) }
+                    if role == "user" { batch.cursor.conversationTurnID = id }
+                    if !text.isEmpty { batch.messages.append((Int64(position) * 1024, message(id: id, text: text, user: role == "user", phase: payload["phase"] as? String, provider: "codex", turnID: batch.cursor.conversationTurnID ?? batch.cursor.turnID, at: recordedAt))) }
+                }
+                if record["type"] as? String == "response_item", let type = payload["type"] as? String,
+                   ["function_call", "custom_tool_call"].contains(type), let call = payload["call_id"] as? String {
+                    beginTool(call, name: payload["name"] as? String ?? "Tool", input: payload["arguments"] ?? payload["input"], provider: "codex", at: recordedAt, position: position, batch: &batch)
+                }
+                if record["type"] as? String == "response_item", let type = payload["type"] as? String,
+                   ["function_call_output", "custom_tool_call_output"].contains(type), let call = payload["call_id"] as? String {
+                    finishTool(call, output: payload["output"], failed: payload["is_error"] as? Bool == true, provider: "codex", at: recordedAt, position: position, batch: &batch)
                 }
             } else if reference.agent == "claude" {
                 if record["type"] as? String == "system", record["subtype"] as? String == "compact_boundary" { batch.cursor.usage = nil; batch.cursor.compactedAt = timestamp }
@@ -132,7 +147,24 @@ enum ProviderTranscriptDecoder {
                     }.joined(separator: "\n")
                     // Tool results (role=user) are not user messages. Thinking blocks stay private.
                     let localCommand = role == "user" && ["<command-name>", "<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"].contains { text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix($0) }
-                    if !text.isEmpty && !localCommand { batch.messages.append((Int64(position), message(id: id, text: text, user: role == "user", phase: nil, provider: "claude"))) }
+                    if role == "user", !text.isEmpty && !localCommand { batch.cursor.conversationTurnID = id }
+                    if let plain = content as? String, !plain.isEmpty && !localCommand {
+                        batch.messages.append((Int64(position) * 1024, message(id: id, text: plain, user: role == "user", phase: nil, provider: "claude", turnID: batch.cursor.conversationTurnID ?? batch.cursor.turnID, at: recordedAt)))
+                    }
+                    var textIndex = 0
+                    for (index, part) in (content as? [[String: Any]] ?? []).enumerated() {
+                        if part["type"] as? String == "text", let prose = part["text"] as? String, !prose.isEmpty && !localCommand {
+                            let proseID = textIndex == 0 ? id : id + ":text:\(textIndex)"
+                            batch.messages.append((Int64(position) * 1024 + Int64(index), message(id: proseID, text: prose, user: role == "user", phase: nil, provider: "claude", turnID: batch.cursor.conversationTurnID ?? batch.cursor.turnID, at: recordedAt)))
+                            textIndex += 1
+                        }
+                        if part["type"] as? String == "tool_use", let call = part["id"] as? String {
+                            beginTool(call, name: part["name"] as? String ?? "Tool", input: part["input"], provider: "claude", at: recordedAt, position: position, subposition: index + 1, batch: &batch)
+                        }
+                        if part["type"] as? String == "tool_result", let call = part["tool_use_id"] as? String {
+                            finishTool(call, output: part["content"], failed: part["is_error"] as? Bool == true, provider: "claude", at: recordedAt, position: position, batch: &batch)
+                        }
+                    }
                 }
             }
             batch.cursor.offset = chunk.offset + UInt64(start)
@@ -143,9 +175,26 @@ enum ProviderTranscriptDecoder {
         let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
-    private static func message(id: String, text: String, user: Bool, phase: String?, provider: String) -> SessionMessage {
+    private static func message(id: String, text: String, user: Bool, phase: String?, provider: String, turnID: String?, at date: Date?) -> SessionMessage {
         let text = user && provider == "codex" ? ConversationImageInstructions.userText(text) : text
-        return SessionMessage(id: provider + ":" + id, fromUser: user, text: text, parts: [MessagePart(text: text, status: phase == "commentary")], artifacts: user ? [] : TerminalPresentation.artifacts(text), phase: phase, source: provider)
+        return SessionMessage(id: provider + ":" + id, fromUser: user, text: text, parts: [MessagePart(text: text, status: phase == "commentary")], artifacts: user ? [] : TerminalPresentation.artifacts(text), phase: phase, source: provider, turnID: turnID, createdAt: date)
+    }
+    private static func beginTool(_ call: String, name: String, input: Any?, provider: String, at date: Date?, position: UInt64, subposition: Int = 0, batch: inout Batch) {
+        let activity = ConversationToolPresentation.activity(name: name, arguments: input, at: date)
+        let item = SessionMessage(id: provider + ":tool:" + call, fromUser: false, text: activity.title + "\n" + activity.input,
+                                  phase: "activity", source: provider, turnID: batch.cursor.conversationTurnID ?? batch.cursor.turnID, createdAt: date, activity: activity)
+        batch.messages.append((Int64(position) * 1024 + Int64(subposition), item))
+        var pending = batch.cursor.pendingTools ?? [:]
+        pending[call] = item
+        if pending.count > 64, let oldest = pending.keys.filter({ $0 != call }).sorted(by: { (pending[$0]?.createdAt ?? .distantPast) < (pending[$1]?.createdAt ?? .distantPast) }).first { pending.removeValue(forKey: oldest) }
+        batch.cursor.pendingTools = pending
+    }
+    private static func finishTool(_ call: String, output: Any?, failed: Bool, provider: String, at date: Date?, position: UInt64, batch: inout Batch) {
+        guard var item = batch.cursor.pendingTools?[call], let activity = item.activity else { return }
+        item.activity = ConversationToolPresentation.finish(activity, output: output, failed: failed, at: date)
+        item.text = activity.title + "\n" + activity.input + "\n" + (item.activity?.output ?? "")
+        batch.messages.append((Int64(position) * 1024, item))
+        batch.cursor.pendingTools?.removeValue(forKey: call)
     }
 }
 
@@ -160,7 +209,9 @@ actor ProviderTranscriptReader {
     func refresh(agent: Agent, machine: Machine) async throws -> Update {
         guard let reference = agent.providerSession, reference.agent == agent.agent else { throw BridgeError.message("Herdr has not linked this terminal to a provider transcript.") }
         let key = ConversationCache.key(for: agent)
-        let previous = try await archive.cursor(for: key) ?? TranscriptCursor()
+        let saved = try await archive.cursor(for: key)
+        let reindex = saved?.presentationVersion != ProviderTranscriptDecoder.presentationVersion || saved?.validated != true
+        let previous = reindex ? TranscriptCursor() : saved ?? TranscriptCursor()
         var chunk: TranscriptChunk
         if machine.id == "local" {
             let path = previous.path.isEmpty ? try ProviderFiles.resolve(reference) : URL(fileURLWithPath: previous.path)
@@ -176,7 +227,7 @@ actor ProviderTranscriptReader {
         let batch = try ProviderTranscriptDecoder.decode(chunk, reference: reference, previous: previous)
         if !batch.cursor.validated && batch.cursor.offset >= chunk.size && chunk.size > 0 { throw BridgeError.message("Provider transcript has no matching session metadata.") }
         if batch.cursor.offset != previous.offset || chunk.identity != previous.identity {
-            try await archive.apply(batch.messages, session: key, cursor: batch.cursor)
+            try await archive.apply(batch.messages, session: key, cursor: batch.cursor, reset: reindex && batch.cursor.validated)
         }
         var usage = batch.cursor.usage
         if reference.agent == "claude" {

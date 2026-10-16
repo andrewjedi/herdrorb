@@ -19,6 +19,7 @@ struct SessionConversation: View {
     @State private var searchBusy = false
     @State private var searchError: String?
     @State private var pageRevision = 0
+    @State private var awayFromLatest = false
     @FocusState private var searchFocused: Bool
     var body: some View {
         VStack(spacing: 0) {
@@ -126,23 +127,40 @@ struct SessionConversation: View {
                     if !session.browsingHistory && session.follow != follow { session.follow = follow }
                     session.scrollOffset = offset
                     model.persist(agent)
-                }, rows: conversationRows)
-                if !agent.isShell && model.needsTerminalResponse(agent) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("Terminal response needed", systemImage: "exclamationmark.circle.fill")
-                            .font(.system(size: 14, weight: .semibold)).foregroundStyle(OrbTheme.warning)
-                        Text("This session is waiting for an approval or another terminal response. Open Terminal, choose an option, and press Return.")
-                            .font(.system(size: 13)).foregroundStyle(OrbTheme.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button { model.respondInTerminal(agent) } label: {
-                            Label("Respond in Terminal", systemImage: "terminal")
-                        }.buttonStyle(OrbButtonStyle(kind: .primary)).disabled(!model.canInteract(agent) || session.settingsBusy)
-                        if !session.draft.isEmpty {
-                            Text("Your chat draft is saved. It will not be sent to the terminal.")
-                                .font(.system(size: 12)).foregroundStyle(OrbTheme.secondary)
+                }, rows: conversationRows, latestVisibilityChanged: { awayFromLatest = $0 })
+                    .overlay(alignment: .bottom) {
+                        if !session.follow && find.isEmpty && (awayFromLatest || session.browsingHistory) {
+                            Button {
+                                if session.browsingHistory { Task { await model.historyPage(agent, earlier: false); session.follow = true; pageRevision += 1 } }
+                                else { session.follow = true; model.persist(agent) }
+                            } label: { Label("Latest", systemImage: "arrow.down") }
+                                .buttonStyle(OrbButtonStyle(compact: true)).padding(.bottom, 9)
                         }
+                    }
+                if !agent.isShell && model.needsTerminalResponse(agent) {
+                    if let approval = session.approval {
+                        ConversationApprovalCard(approval: approval, provider: agent.kind,
+                            busy: session.busy || session.settingsBusy,
+                            choose: { choice in Task { await model.respondToApproval(agent, choice: choice) } },
+                            openTerminal: { model.respondInTerminal(agent) })
+                            .frame(maxWidth: 780).padding(.horizontal, 28).frame(maxWidth: .infinity).padding(.vertical, 10)
+                    } else {
+                    HStack(alignment: .center, spacing: 14) {
+                        Image(systemName: "hand.raised").foregroundStyle(OrbTheme.warning)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("\(agent.kind) is waiting for you").font(.system(size: 13, weight: .medium))
+                            Text("Choose a response in Terminal. Your draft is saved.")
+                                .font(.system(size: 11)).foregroundStyle(OrbTheme.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                        Button { model.respondInTerminal(agent) } label: {
+                            Label("Respond", systemImage: "terminal")
+                        }.buttonStyle(OrbButtonStyle(compact: true)).disabled(!model.canInteract(agent) || session.settingsBusy)
                     }.frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 24).padding(.vertical, 16)
+                        .padding(14).background(OrbTheme.surface, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal, 28).padding(.vertical, 12)
+                    }
                 } else if !agent.isShell {
                     ConversationComposer(model: model, agent: agent, session: session)
                 }
@@ -161,6 +179,14 @@ struct SessionConversation: View {
                 searchBusy = false
             }
             .onDisappear { model.persist(agent) }
+            .onAppear {
+                if AppPreferences.isDemo, let screen = DesignPreviewScreen.requested, [.workDetails, .claudeWorkDetails].contains(screen) {
+                    if let work = ConversationTimeline.items(session.messages, provider: agent.agent, working: false).first(where: { $0.kind == .work }) {
+                        expandedActivity.insert(work.id)
+                        expandedActivity.insert("preview-tool-1")
+                    }
+                }
+            }
     }
     private func setupView(_ setup: TerminalSetupScreen) -> some View {
         ScrollView {
@@ -222,8 +248,8 @@ struct SessionConversation: View {
                 .disabled(session.busy || session.settingsBusy || !model.canInteract(agent) || session.cached)
         }.onDisappear { loginCode = "" }
     }
-    private func entry(_ id: String, message: SessionMessage? = nil, state: String = "", @ViewBuilder content: @escaping () -> some View) -> ConversationRowEntry {
-        ConversationRowEntry(id: id, message: message, state: state) {
+    private func entry(_ id: String, message: SessionMessage? = nil, messages: [SessionMessage]? = nil, state: String = "", @ViewBuilder content: @escaping () -> some View) -> ConversationRowEntry {
+        ConversationRowEntry(id: id, message: message, messages: messages, state: state) {
             AnyView(content().frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .font(OrbTheme.bodyFont).foregroundStyle(OrbTheme.text)
@@ -253,10 +279,21 @@ struct SessionConversation: View {
         if !find.isEmpty, let searchError {
             result.append(entry("searchError", state: searchError) { Text(searchError).font(.caption) })
         }
-        for message in visibleMessages {
-            let status = message.id == session.messages.last?.id ? agent.agent_status + String(session.pending.isEmpty) : ""
-            result.append(entry("message:" + message.id, message: message,
-                state: status + String(expandedActivity.contains(message.id)) + find + (agent.agent ?? "") + (agent.cwd ?? "")) { row(message) })
+        let timeline = ConversationTimeline.items(visibleMessages, provider: agent.agent, working: agent.agent_status == "working")
+        for (index, item) in timeline.enumerated() {
+            let active = find.isEmpty && index == timeline.count - 1 && !session.browsingHistory
+            if item.kind == .work {
+                let state = String(active) + agent.agent_status + expandedActivity.sorted().joined(separator: "|") + find
+                result.append(entry(item.id, messages: item.messages, state: state) {
+                    ConversationWorkGroup(item: item, working: active && agent.agent_status == "working",
+                                          blocked: active && agent.agent_status == "blocked",
+                                          disclosures: expandedActivity, find: find, machine: machine, cwd: agent.cwd, toggle: toggleDisclosure)
+                })
+            } else if let message = item.messages.first {
+                let status = active ? agent.agent_status + String(session.pending.isEmpty) : ""
+                result.append(entry(item.id, message: message,
+                    state: status + find + (agent.agent ?? "") + (agent.cwd ?? "")) { row(message) })
+            }
         }
         if !find.isEmpty, let page = searchPage, page.hasEarlier && !page.messages.isEmpty {
             result.append(entry("moreMatches", state: String(pageRevision)) {
@@ -272,22 +309,14 @@ struct SessionConversation: View {
                 }.buttonStyle(OrbButtonStyle(compact: true))
             })
         }
-        for pending in session.pending {
-            result.append(entry("pending:" + pending.id.uuidString, state: pending.text + String(describing: pending.state)) {
-                VStack(alignment: .leading, spacing: 5) {
-                    PendingMessageView(text: String(pending.text.prefix(LongMessagePresentation.limit)), state: pending.state)
-                    if pending.text.count > LongMessagePresentation.limit {
-                        Button("Open complete message") { FullMessageWindow.show(pending.text) }.buttonStyle(.plain).font(.caption)
-                    }
-                    if pending.state != "Sending…" {
-                        Button("Dismiss receipt") { model.dismissReceipt(pending.id, agent: agent) }
-                            .buttonStyle(.plain).font(.caption).foregroundStyle(OrbTheme.secondary)
-                    }
-                }
+        if !session.pending.isEmpty {
+            result.append(entry("delivery-receipts", state: session.pending.map { $0.id.uuidString + $0.state }.joined() + String(expandedActivity.contains("delivery-receipts"))) {
+                ConversationDeliveryReceipts(pending: session.pending, expanded: expandedActivity.contains("delivery-receipts"),
+                    toggle: { toggleDisclosure("delivery-receipts") }, dismiss: { model.dismissReceipt($0, agent: agent) })
             })
         }
-        if find.isEmpty && agent.agent_status == "working" && (session.messages.last?.fromUser != false || !session.pending.isEmpty || agent.agent != "codex") {
-            result.append(entry("thinking") { ConversationActivityLabel(title: "Thinking…", working: true) })
+        if find.isEmpty && agent.agent_status == "working" && timeline.last?.kind != .work && session.messages.last?.phase != "final_answer" {
+            result.append(entry("thinking") { ConversationActivityLabel(title: "Working…", working: true) })
         }
         return result
     }
@@ -315,15 +344,16 @@ struct SessionConversation: View {
             } else { model.closeTerminal(agent) }
         }.help(terminal ? "Interact with the live terminal" : "Read the formatted conversation")
     }
+    private func toggleDisclosure(_ id: String) {
+        session.follow = false
+        if expandedActivity.contains(id) { expandedActivity.remove(id) }
+        else { expandedActivity.insert(id) }
+    }
     private func row(_ message: SessionMessage) -> some View {
         ConversationMessageRow(message: message, kind: agent.agent, machine: machine, cwd: agent.cwd,
-            working: agent.agent_status == "working" && session.pending.isEmpty && message.id == session.messages.last?.id,
+            working: agent.agent_status == "working" && message.id == session.messages.last?.id,
             blocked: agent.agent_status == "blocked" && message.id == session.messages.last?.id,
-            disclosed: expandedActivity.contains(message.id), find: find) {
-                session.follow = false
-                if expandedActivity.contains(message.id) { expandedActivity.remove(message.id) }
-                else { expandedActivity.insert(message.id) }
-            }.equatable()
+            disclosed: expandedActivity.contains(message.id), find: find) { toggleDisclosure(message.id) }.equatable()
     }
 }
 
@@ -344,72 +374,48 @@ struct ConversationMessageRow: View, Equatable {
         lhs.message == rhs.message && lhs.kind == rhs.kind && lhs.machine == rhs.machine && lhs.cwd == rhs.cwd
             && lhs.working == rhs.working && lhs.blocked == rhs.blocked && lhs.disclosed == rhs.disclosed && lhs.find == rhs.find
     }
+    @State private var hovered = false
+    @State private var copied = false
+    @FocusState private var copyFocused: Bool
     var body: some View {
         let displayed = LongMessagePresentation.preview(message)
-        let response = TerminalPresentation.response(displayed, kind: kind, working: working || blocked)
-        let searchActivity = !find.isEmpty && response.activity.localizedCaseInsensitiveContains(find)
-        let expanded = disclosed || searchActivity
-        let codex = !message.fromUser && kind == "codex" && message.source == nil
-        return HStack(alignment: .top, spacing: 0) {
-            if message.fromUser { Spacer(minLength: 80) }
-            VStack(alignment: .leading, spacing: 12) {
-                if codex && (!response.activity.isEmpty || working || response.duration != nil) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Button {
-                            toggleDisclosure()
-                        } label: {
-                            HStack(spacing: 7) {
-                                ConversationActivityLabel(title: working ? "Thinking…" : blocked ? "Waiting for your response" : response.duration ?? "Work details", working: working)
-                                if !response.activity.isEmpty {
-                                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                                        .font(.system(size: 10, weight: .medium)).foregroundStyle(OrbTheme.muted)
-                                }
-                            }.frame(minHeight: 26).contentShape(Rectangle())
-                        }.buttonStyle(.plain).disabled(response.activity.isEmpty || searchActivity)
-                            .accessibilityLabel(working ? "Thinking" : blocked ? "Waiting for your response" : response.duration ?? "Work details")
-                            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-                            .accessibilityHint(searchActivity ? "Activity is expanded to show search matches" : "Show or hide intermediate updates and commands")
-                        if expanded && !response.activity.isEmpty {
-                            Text(response.activity)
-                                .font(.system(size: 12)).foregroundStyle(OrbTheme.secondary)
-                                .lineSpacing(4).textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .padding(.leading, 15).padding(.vertical, 2)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .overlay(alignment: .leading) { Rectangle().fill(OrbTheme.line).frame(width: 1) }
-                        }
-                    }
-                }
-                if codex {
-                    if !response.answer.isEmpty {
-                        ConversationMarkdown(text: response.answer).equatable()
-                            .font(.system(size: 15)).foregroundStyle(OrbTheme.text).lineSpacing(4)
+        return VStack(alignment: message.fromUser ? .trailing : .leading, spacing: 5) {
+            HStack(alignment: .top, spacing: 0) {
+                if message.fromUser { Spacer(minLength: 64) }
+                VStack(alignment: .leading, spacing: 12) {
+                    if message.fromUser {
+                        Text(displayed.text).font(.system(size: 14.5)).lineSpacing(4).textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
+                    } else { ConversationMarkdown(text: displayed.text).equatable() }
+                    if displayed.text != message.text {
+                        Button { FullMessageWindow.show(message.text) } label: {
+                            Label("Read complete message", systemImage: "arrow.up.left.and.arrow.down.right")
+                        }.buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundStyle(OrbTheme.accent)
                     }
-                } else {
-                    ForEach(Array(displayed.parts.enumerated()), id: \.offset) { partIndex, part in
-                        Group {
-                            if message.fromUser || part.status { Text(part.text) }
-                            else { ConversationMarkdown(text: message.source == nil && partIndex == 0 && (part.text.hasPrefix("• ") || part.text.hasPrefix("● ")) ? String(part.text.dropFirst(2)) : part.text).equatable() }
-                        }
-                        .font(.system(size: part.status ? 12 : 15)).foregroundStyle(part.status ? OrbTheme.secondary : OrbTheme.text)
-                        .lineSpacing(part.status ? 1 : 4).textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(message.artifacts.prefix(20))) { artifact in
+                        ArtifactCard(artifact: artifact, machine: machine, cwd: cwd)
                     }
                 }
-                if displayed.text != message.text {
-                    Button("Open complete message (\(message.text.count.formatted()) characters)") {
-                        FullMessageWindow.show(message.text)
-                    }.buttonStyle(OrbButtonStyle(compact: true))
-                }
-                ForEach(Array((codex ? response.artifacts : message.artifacts).prefix(20))) { artifact in
-                    ArtifactCard(artifact: artifact, machine: machine, cwd: cwd)
-                }
-            }
-                .padding(.horizontal, message.fromUser ? 16 : 0).padding(.vertical, message.fromUser ? 12 : 0)
-                .background(message.fromUser ? OrbTheme.raised : .clear, in: RoundedRectangle(cornerRadius: 17))
+                .foregroundStyle(OrbTheme.text)
+                .padding(.horizontal, message.fromUser ? 14 : 0).padding(.vertical, message.fromUser ? 11 : 0)
+                .background(message.fromUser ? OrbTheme.raised.opacity(0.8) : .clear, in: RoundedRectangle(cornerRadius: 14))
                 .frame(maxWidth: message.fromUser ? nil : .infinity, alignment: .leading)
-        }.frame(maxWidth: .infinity, alignment: message.fromUser ? .trailing : .leading)
+            }
+            HStack(spacing: 10) {
+                Button {
+                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(message.text, forType: .string); copied = true
+                } label: { Image(systemName: copied ? "checkmark" : "doc.on.doc") }
+                    .buttonStyle(.plain).focused($copyFocused).help("Copy message").accessibilityLabel(copied ? "Message copied" : "Copy message")
+                if let date = message.createdAt { Text(date.formatted(date: .omitted, time: .shortened)).monospacedDigit() }
+                if copied { Text("Copied").foregroundStyle(OrbTheme.online) }
+            }.font(.system(size: 10)).foregroundStyle(OrbTheme.muted).frame(height: 17)
+                .padding(.horizontal, message.fromUser ? 5 : 0)
+                .opacity(hovered || copyFocused || copied ? 1 : 0)
+        }.onHover { hovered = $0 }
+            .task(id: copied) {
+                guard copied else { return }; try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled else { return }; copied = false
+            }
     }
 }
 
@@ -483,6 +489,41 @@ private struct ContextUsageIndicator: View {
                 }
             }.font(.system(size: 12)).foregroundStyle(OrbTheme.secondary)
                 .fixedSize(horizontal: false, vertical: true).padding(16).frame(width: 300)
+        }
+    }
+}
+
+private struct ConversationDeliveryReceipts: View {
+    let pending: [PendingMessage]
+    let expanded: Bool
+    let toggle: () -> Void
+    let dismiss: (UUID) -> Void
+    private var uncertain: Bool { pending.contains { $0.state == "Not confirmed" } }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button(action: toggle) {
+                HStack(spacing: 7) {
+                    Image(systemName: uncertain ? "exclamationmark.circle" : "arrow.up.circle")
+                    Text(uncertain ? "Check message delivery" : pending.last?.state == "Sending…" ? "Sending…" : "Delivery status")
+                    Text("\(pending.count)").monospacedDigit().foregroundStyle(OrbTheme.muted)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 8))
+                }.font(.system(size: 11)).foregroundStyle(uncertain ? OrbTheme.warning : OrbTheme.muted)
+            }.buttonStyle(.plain)
+            if expanded || uncertain {
+                ForEach(pending) { receipt in
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(receipt.text).lineLimit(2).foregroundStyle(OrbTheme.secondary)
+                            Text(receipt.state).foregroundStyle(OrbTheme.muted)
+                        }.font(.system(size: 11)).textSelection(.enabled)
+                        Spacer(minLength: 0)
+                        if receipt.state != "Sending…" {
+                            Button { dismiss(receipt.id) } label: { Image(systemName: "xmark").font(.system(size: 9)) }
+                                .buttonStyle(.plain).help("Dismiss receipt").accessibilityLabel("Dismiss delivery receipt")
+                        }
+                    }.padding(10).background(OrbTheme.surface, in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
         }
     }
 }
