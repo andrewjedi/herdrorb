@@ -9,7 +9,7 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.6.0"),
         .package(
             url: "https://github.com/migueldeicaza/SwiftTerm.git",
-            exact: "1.20.0"
+            exact: "1.99.2"
         )
     ],
     targets: [
